@@ -261,6 +261,30 @@ class MultiplexImageEncoder(nn.Module):
             outputs["features"] = features
 
         return outputs
+    
+
+class Classifier(nn.Module):
+    def __init__(
+        self,
+        input_embedding_dim: int,
+        layer_dims: list,
+    ) -> None:
+        """
+        Args:
+            input_embedding_dim (int): Embedding dimension of the input tensor.
+
+        """
+
+        super().__init__()
+
+        self.mlp = nn.Sequential(
+            *[
+                nn.Linear(layer_dims[i], layer_dims[i+1])
+                for i in range(len(layer_dims-1))]
+        )
+
+    def forward(self, x):
+
 
 
 class MultiplexImageDecoder(nn.Module):

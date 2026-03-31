@@ -1,7 +1,7 @@
 import os
 import sys
 
-import comet_ml  # noqa: F401
+#import comet_ml  # noqa: F401
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
@@ -97,8 +97,8 @@ model = MultiplexAutoencoder(
     encoder_config=config.encoder_config.model_dump(),
     decoder_config=config.decoder_config.model_dump(),
 )
-ckpt = torch.load('/raid_encrypted/immucan/models/' +MODEL_NAME+ '.pth',map_location=torch.device('cpu'))['model_state_dict']
-
+ckpt = torch.load('models/' +MODEL_NAME+ '.pth',map_location=torch.device('cpu'))['model_state_dict']
+#/raid_encrypted/immucan/
 filtered_ckpt = {
     k: v for k, v in ckpt.items()
     if not k.startswith("decoder.pred")
