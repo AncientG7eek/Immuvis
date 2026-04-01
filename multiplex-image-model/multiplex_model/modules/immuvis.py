@@ -267,6 +267,8 @@ class Classifier(nn.Module):
     def __init__(
         self,
         input_embedding_dim: int,
+        num_channels: int,
+        encoder_config: dict,
         layer_dims: list,
     ) -> None:
         """
@@ -282,9 +284,13 @@ class Classifier(nn.Module):
                 nn.Linear(layer_dims[i], layer_dims[i+1])
                 for i in range(len(layer_dims-1))]
         )
+        self.logsoftmax = nn.LogSoftmax()
 
     def forward(self, x):
+        x = self.mlp(x)
+        preds = self.logsoftmax(x)
 
+        return preds
 
 
 class MultiplexImageDecoder(nn.Module):
@@ -484,3 +490,10 @@ class MultiplexAutoencoder(nn.Module):
         if return_features:
             outputs["features"] = encoding_output["features"]
         return outputs
+
+class Finetuning(nn.Module):
+    def __init__(self,):
+        pass
+
+    def forward(self):
+        pass
