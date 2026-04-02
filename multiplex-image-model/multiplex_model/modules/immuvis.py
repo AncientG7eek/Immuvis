@@ -4,6 +4,8 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+import numpy as np
+
 from .base_modules import Block, Encoder, Identity, LayerNorm
 from .registry import resolve_block_class, resolve_encoder_class
 
@@ -266,9 +268,6 @@ class MultiplexImageEncoder(nn.Module):
 class Classifier(nn.Module):
     def __init__(
         self,
-        input_embedding_dim: int,
-        num_channels: int,
-        encoder_config: dict,
         layer_dims: list,
     ) -> None:
         """
@@ -282,7 +281,8 @@ class Classifier(nn.Module):
         self.mlp = nn.Sequential(
             *[
                 nn.Linear(layer_dims[i], layer_dims[i+1])
-                for i in range(len(layer_dims-1))]
+                for i in range(len(layer_dims-1))
+            ]
         )
         self.logsoftmax = nn.LogSoftmax()
 
@@ -492,8 +492,63 @@ class MultiplexAutoencoder(nn.Module):
         return outputs
 
 class Finetuning(nn.Module):
-    def __init__(self,):
-        pass
+    def __init__(
+        self,
+        num_channels: int,
+        encoder_config: dict,
+        classifier_config: dict,
+    ):
+        """Initialize the Multiplex Autoencoder model.
+
+        Args:
+            num_channels (int): Number of all possible channels/markers.
+            encoder_config (dict): Configuration for the encoder.
+            decoder_config (dict): Configuration for the decoder.
+        """
+        super().__init__()
+        self.latent_dim = encoder_config["pm_embedding_dims"][-1]
+        self.num_channels = num_channels
+        self.layer_dims = classifier_config["layer_dims"]
+
+        self.encoder = MultiplexImageEncoder(
+            num_channels=self.num_channels, **encoder_config
+        )
+
+        self.classifier = Classifier(
+            layer_dims=self.layer_dims
+        )
+     
+
+    def encode(
+        self,
+        x: torch.Tensor,
+        encoded_indices: torch.Tensor,
+        return_features: bool = False,
+    ) -> dict:
+        """Encode the input images using the encoder.
+
+        Args:
+            x (torch.Tensor): Input images tensor with shape (B, C, H, W).
+            encoded_indices (torch.Tensor): Indices of the markers in channels.
+            return_features (bool, optional): If True, returns the features after encoding. Defaults to False.
+
+        Returns:
+            dict: A dictionary containing the encoded images tensor (under 'output') and optionally the features.
+        """
+        encoding_output = self.encoder(
+            x, encoded_indices, return_features=return_features
+        )
+        outputs = {"output": encoding_output["output"]}
+
+        if return_features:
+            outputs["features"] = encoding_output["features"]
+        return outputs
+    
+    def classify(
+            self,
+            x,
+            y
+    )
 
     def forward(self):
         pass
