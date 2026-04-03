@@ -268,7 +268,9 @@ class MultiplexImageEncoder(nn.Module):
 class Classifier(nn.Module):
     def __init__(
         self,
-        layer_dims: list,
+        input_dim: int,
+        hidden_dims: list,
+        num_classes: int,
     ) -> None:
         """
         Args:
@@ -277,20 +279,20 @@ class Classifier(nn.Module):
         """
 
         super().__init__()
-
+        hidden_dims = [input_dim] + hidden_dims + [num_classes]
         self.mlp = nn.Sequential(
+
             *[
-                nn.Linear(layer_dims[i], layer_dims[i+1])
-                for i in range(len(layer_dims-1))
+                nn.Linear(hidden_dims[i], hidden_dims[i+1])
+                for i in range(len(hidden_dims)-1)
             ]
         )
         self.logsoftmax = nn.LogSoftmax()
 
     def forward(self, x):
         x = self.mlp(x)
-        preds = self.logsoftmax(x)
-
-        return preds
+        
+        return self.logsoftmax(x)
 
 
 class MultiplexImageDecoder(nn.Module):
@@ -508,14 +510,17 @@ class Finetuning(nn.Module):
         super().__init__()
         self.latent_dim = encoder_config["pm_embedding_dims"][-1]
         self.num_channels = num_channels
-        self.layer_dims = classifier_config["layer_dims"]
+        self.hidden_dims = classifier_config["hidden_dims"]
+        self.num_classes = classifier_config["num_classes"]
 
         self.encoder = MultiplexImageEncoder(
             num_channels=self.num_channels, **encoder_config
         )
 
         self.classifier = Classifier(
-            layer_dims=self.layer_dims
+            input_dim = self.hidden_dims,
+            hidden_dims= self.hidden_dims,
+            num_classes= self.num_classes,
         )
      
 
@@ -544,11 +549,8 @@ class Finetuning(nn.Module):
             outputs["features"] = encoding_output["features"]
         return outputs
     
-    def classify(
-            self,
-            x,
-            y
-    )
+    def forward(self, x):
+        emb = self.encoder(x)
+        pred = self.classifier(emb)
 
-    def forward(self):
-        pass
+        return pred
