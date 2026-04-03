@@ -1,7 +1,7 @@
 import os
 import random
 from glob import glob
-from typing import Literal
+from typing import Literal, List
 
 import numpy as np
 import tifffile
@@ -74,6 +74,7 @@ class DatasetFromTIFF(Dataset):
         for dataset in panels_config["datasets"]:
             if dataset in ['jackson-basel']:
                 tiffs = glob(os.path.join(img_path, dataset, "imgs", f"*.{file_extension}"))
+                tiffs =tiffs[:5]
                 self.imgs.extend([(tiff, dataset) for tiff in tiffs])
 
         if use_global_clip_limits:
@@ -139,26 +140,47 @@ class DatasetFromTIFF(Dataset):
         if self.use_preprocessing:
             img = self.preprocess(img)
 
+        # if self.transform:
+        #     img, coords = self.transform(torch.tensor(img))
+        #     img = img.numpy()
+
+        # if self.use_butterworth:
+        #     img = self.butterworth(img)
+
+        # if self.use_denoising:
+        #     img = self.denoise(img)
+
+        # if self.use_clip_normalization:
+        #     img = self.norm_clip(img, dataset)
+
+        # elif self.use_minmax_normalization:
+        #     img = self.norm_minmax(img)
+
         if self.transform:
-            img, coords = self.transform(torch.tensor(img))
-            img = img.numpy()
+            crops, coords = self.transform(torch.tensor(img))
 
         if self.use_butterworth:
-            img = self.butterworth(img)
+            crops = [self.butterworth(crop) for crop in crops]
 
         if self.use_denoising:
-            img = self.denoise(img)
+            crops = [self.denoise(crop) for crop in crops]
 
         if self.use_clip_normalization:
-            img = self.norm_clip(img, dataset)
+            crops = [self.norm_clip(crop, dataset) for crop in crops]
 
         elif self.use_minmax_normalization:
-            img = self.norm_minmax(img)
-
-        img = torch.tensor(img)
+            crops = [self.norm_minmax(crop) for crop in crops]
+        crops = torch.stack([torch.from_numpy(crop) for crop in crops])
+        dataset = [dataset] * len(crops)
+        img_path = [img_path] * len(crops)
+    #     return torch.tensor(img), channel_ids, dataset, img_path
+        for thing in [crops, coords, channel_ids, dataset, img_path]:
+            print(len(thing), flush=True)
         if self.transform:
-            return img, coords, channel_ids, dataset, img_path
-        return img, channel_ids, dataset, img_path
+            return crops, coords, channel_ids, dataset, img_path
+        return crops, channel_ids, dataset, img_path
+        
+
 
 
 class PanelBatchSampler(Sampler):
@@ -228,3 +250,24 @@ class TestCrop:
         img = crop(img, top, left, self.size, self.size)
 
         return img, (top,left)
+
+class GridCrop:
+    def __init__(self, crop_size: int):
+        self.crop_size = crop_size
+
+    def __call__(self, img: torch.Tensor) -> List[torch.Tensor]:
+        h, w = img.shape[-2], img.shape[-1]
+        crops = []
+        coordinates = [] # [((x,x),(y,y))] crop's span in x and y dim
+        num_rows = h // self.crop_size
+        num_cols = w // self.crop_size
+        
+        for i in range(num_rows):
+            for j in range(num_cols):
+                top = i * self.crop_size
+                left = j * self.crop_size
+                img = crop(img, top, left, self.crop_size, self.crop_size)
+                crops.append(img.numpy())
+                coordinates.append(((int(top),int(top)+self.crop_size),(int(left),int(left)+self.crop_size)))
+        
+        return crops, np.array(coordinates)

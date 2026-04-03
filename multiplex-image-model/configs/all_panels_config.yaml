@@ -1,6 +1,6 @@
 paths:
-  train: /home/kacper/Documents/oświata/UW/2nd_yr/magisterka/split/train
-  test: /home/kacper/Documents/oświata/UW/2nd_yr/magisterka/split/test
+  train: /raid_encrypted/immucan/immuvis_split/train
+  test: /raid_encrypted/immucan/immuvis_split/test
 datasets:
 - ajaib
 - bc2
