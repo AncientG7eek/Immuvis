@@ -18,6 +18,7 @@ class DatasetFromTIFF(Dataset):
         panels_config: dict,
         split: str,
         marker_tokenizer: dict[str, int],
+        subset=None,
         transform=None,
         use_preprocessing: bool = True,
         use_median_denoising: bool = False,
@@ -72,10 +73,11 @@ class DatasetFromTIFF(Dataset):
         img_path = panels_config["paths"][split]
         self.imgs = []  # tuples of (img_path, dataset)
         for dataset in panels_config["datasets"]:
-            if dataset in ['jackson-basel']:
-                tiffs = glob(os.path.join(img_path, dataset, "imgs", f"*.{file_extension}"))
-                tiffs =tiffs[:5]
-                self.imgs.extend([(tiff, dataset) for tiff in tiffs])
+            if subset:
+                if dataset in subset:
+                    tiffs = glob(os.path.join(img_path, dataset, "imgs", f"*.{file_extension}"))
+                    tiffs =tiffs[:5]
+                    self.imgs.extend([(tiff, dataset) for tiff in tiffs])
 
         if use_global_clip_limits:
             self.clip_limits = {}

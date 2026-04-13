@@ -90,6 +90,7 @@ from .immuvis import (
     MultiplexAutoencoder,
     MultiplexImageDecoder,
     MultiplexImageEncoder,
+    Finetuning
 )
 
 

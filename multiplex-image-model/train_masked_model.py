@@ -4,6 +4,7 @@ import sys
 import comet_ml  # noqa: F401
 import matplotlib.pyplot as plt
 import numpy as np
+import pandas as pd
 import torch
 import torch.optim as optim
 from ruamel.yaml import YAML
@@ -19,9 +20,10 @@ from torchvision.transforms import (
 from torchvision.transforms.functional import InterpolationMode
 from tqdm import tqdm
 
+from multiplex_model.clinical import concat_metadata, merge_metadata_with_melted, get_a_subset
 from multiplex_model.data import DatasetFromTIFF, PanelBatchSampler, TestCrop
 from multiplex_model.losses import RankMe, beta_nll_loss, nll_loss
-from multiplex_model.modules import MultiplexAutoencoder
+from multiplex_model.modules.immuvis import Finetuning
 from multiplex_model.utils import (
     ClampWithGrad,
     TrainingConfig,
@@ -31,8 +33,8 @@ from multiplex_model.utils import (
     get_run_name,
     get_scheduler_with_warmup,
     init_experiment,
-    log_training_metrics,
-    log_validation_images,
+    log_finetuning_training_metrics,
+    log_finetuning_validation_images,
     log_validation_metrics,
     plot_reconstructs_with_masks,
 )
@@ -45,6 +47,9 @@ def train_masked(
     train_dataloader,
     val_dataloader,
     device,
+    cli_feat_for_subset,
+    melted_table,
+    classes,
     marker_names_map,
     epochs=10,
     gradient_accumulation_steps=1,
@@ -67,35 +72,32 @@ def train_masked(
         print(f"Created checkpoints directory at {checkpoints_path}")
 
     step = start_epoch * (len(train_dataloader) // gradient_accumulation_steps)
+
     for epoch in range(start_epoch, epochs):
         model.train()
+        all_preds = []
+        all_y = []
         for batch_idx, (img, channel_ids, panel_idx, img_path) in enumerate(
             tqdm(train_dataloader, desc=f"Epoch {epoch}")
         ):
             img = img.to(device, dtype=torch.float32)
             channel_ids = channel_ids.to(device, dtype=torch.long)
 
-            # Apply channel masking with channel subset sampling
-            img, channel_ids, masked_img, active_channel_ids = apply_channel_masking(
-                img,
-                channel_ids,
-                min_channels_frac,
-                fully_masked_channels_max_frac,
-                apply_channel_subset_sampling=True,
-            )
+            # here use img_path to get clinical 
+            all_cli_features = get_a_subset(melted_table, "img_path", img_path) # make the function cope with batch of values, 
+            selected_cli_feat = get_a_subset(all_cli_features, "feature", cli_feat_for_subset)
+            y = selected_cli_feat["value"]
 
-            # Apply spatial masking
-            masked_img, _ = apply_spatial_masking(
-                masked_img, spatial_masking_ratio, mask_patch_size
-            )
+            loss_fn = torch.nn.NLLLoss()
 
             with autocast(device_type="cuda", dtype=torch.bfloat16):
-                output = model(masked_img, active_channel_ids, channel_ids)["output"]
-                mi, logvar = output.unbind(dim=-1)
-                mi = torch.sigmoid(mi)
-                logvar = ClampWithGrad.apply(logvar, -15.0, 15.0)
+                
+                logits = model(x=img, encoded_indices=channel_ids)
+                preds = torch.argmax(logits, dim=1)
+                loss = loss_fn(preds, y)
 
-                loss = beta_nll_loss(img, mi, logvar, beta=beta)
+                all_preds.append(preds.cpu())
+                all_y.append(y.cpu())
 
             scaler.scale(loss / gradient_accumulation_steps).backward()
 
@@ -107,16 +109,19 @@ def train_masked(
                 optimizer.zero_grad()
                 scheduler.step()
 
-                log_training_metrics(
-                    loss=loss.item(),
-                    lr=scheduler.get_last_lr()[0],
-                    mu=mi.mean().item(),
-                    logvar=logvar.mean().item(),
-                    mae=torch.abs(img - mi).mean().item(),
-                    mse=torch.square(img - mi).mean().item(),
-                    step=step,
-                )
                 step += 1
+
+        all_preds = torch.cat(all_preds).cpu().numpy()
+        all_y = torch.cat(all_y).cpu().numpy()
+
+        log_finetuning_validation_metrics(
+            loss=loss.item(),
+            preds=all_preds,
+            y=all_y,
+            classes=classes,
+            step=step,
+        )
+            
 
         test_masked(
             model,
@@ -171,8 +176,9 @@ def test_masked(
     plot_indices = set(plot_indices)
 
     all_latents = []
-    all_channel_variances = []
-    all_channel_maes = []
+    all_preds = []
+    all_y = []
+
 
     with torch.no_grad():
         for idx, (img, channel_ids, panel_idx, img_path) in enumerate(
@@ -181,73 +187,89 @@ def test_masked(
             img = img.to(device, dtype=torch.float32)
             channel_ids = channel_ids.to(device, dtype=torch.long)
 
-            # Apply channel masking (only full channel masking for validation, no channel dropping)
-            _, _, masked_img, active_channel_ids = apply_channel_masking(
-                img,
-                channel_ids,
-                fully_masked_channels_max_frac=fully_masked_channels_max_frac,
-                apply_channel_subset_sampling=False,
-            )
+            # # Apply channel masking (only full channel masking for validation, no channel dropping)
+            # _, _, masked_img, active_channel_ids = apply_channel_masking(
+            #     img,
+            #     channel_ids,
+            #     fully_masked_channels_max_frac=fully_masked_channels_max_frac,
+            #     apply_channel_subset_sampling=False,
+            # )
 
-            # Apply spatial masking
-            masked_img, pixel_mask = apply_spatial_masking(
-                masked_img, spatial_masking_ratio, mask_patch_size
-            )
+            # # Apply spatial masking
+            # masked_img, pixel_mask = apply_spatial_masking(
+            #     masked_img, spatial_masking_ratio, mask_patch_size
+            # )
 
-            latent = model.encode(masked_img, active_channel_ids)["output"]
-            output = model.decode(latent, channel_ids)
-            mi, logvar = output.unbind(dim=-1)
-            mi = torch.sigmoid(mi)
+            all_cli_features = get_a_subset(melted_table, "img_path", img_path) # make the function cope with batch of values, 
+            selected_cli_feat = get_a_subset(all_cli_features, "feature", cli_feat_for_subset)
+            y = selected_cli_feat["value"]
 
-            latent = normalize(latent.mean(dim=(2, 3)), p=2, dim=1)
-            all_latents.append(latent.cpu())
+            loss_fn = torch.nn.NLLLoss()
 
-            # Accumulate per-channel statistics for correlation analysis
-            variance_per_channel = torch.exp(logvar).mean(
-                dim=(0, 2, 3)
-            )  # Mean variance per channel
-            mae_per_channel = torch.abs(img - mi).mean(dim=(0, 2, 3))  # MAE per channel
-            all_channel_variances.append(variance_per_channel.cpu())
-            all_channel_maes.append(mae_per_channel.cpu())
+            with autocast(device_type="cuda", dtype=torch.bfloat16):
+                
+                logits = model(x=img, encoded_indices=channel_ids)
+                preds = torch.argmax(logits, dim=1)
+                loss = loss_fn(preds, y)
 
-            loss = nll_loss(img, mi, logvar)
+                all_preds.append(preds.cpu())
+                all_y.append(y.cpu())
+                
+
+            # # Accumulate per-channel statistics for correlation analysis
+            # variance_per_channel = torch.exp(logvar).mean(
+            #     dim=(0, 2, 3)
+            # )  # Mean variance per channel
+            # mae_per_channel = torch.abs(img - mi).mean(dim=(0, 2, 3))  # MAE per channel
+            # all_channel_variances.append(variance_per_channel.cpu())
+            # all_channel_maes.append(mae_per_channel.cpu())
+
+            # loss = nll_loss(img, mi, logvar)
             running_loss += loss.item()
-            running_mae += torch.abs(img - mi).mean().item()
-            running_mse += torch.square(img - mi).mean().item()
+            # running_mae += torch.abs(img - mi).mean().item()
+            # running_mse += torch.square(img - mi).mean().item()
 
-            if idx in plot_indices:
-                unactive_channels = [
-                    i for i in channel_ids[0] if i not in active_channel_ids[0]
-                ]
-                masked_channels_names = " | ".join(
-                    [marker_names_map[i.item()] for i in unactive_channels]
-                )
+            # if idx in plot_indices:
+            #     unactive_channels = [
+            #         i for i in channel_ids[0] if i not in active_channel_ids[0]
+            #     ]
+            #     masked_channels_names = " | ".join(
+            #         [marker_names_map[i.item()] for i in unactive_channels]
+            #     )
 
-                reconstr_img = plot_reconstructs_with_masks(
-                    img,
-                    mi,
-                    pixel_mask,
-                    channel_ids,
-                    unactive_channels,
-                    markers_names_map=marker_names_map,
-                    ncols=9,
-                )
-                log_validation_images(
-                    fig=reconstr_img,
-                    panel_idx=panel_idx[0],
-                    img_path=img_path[0],
-                    epoch=epoch,
-                    masked_channels_names=masked_channels_names,
-                    img_idx=idx,
-                )
-                plt.close("all")
+            #     reconstr_img = plot_reconstructs_with_masks(
+            #         img,
+            #         mi,
+            #         pixel_mask,
+            #         channel_ids,
+            #         unactive_channels,
+            #         markers_names_map=marker_names_map,
+            #         ncols=9,
+            #     )
+            #     log_validation_images(
+            #         fig=reconstr_img,
+            #         panel_idx=panel_idx[0],
+            #         img_path=img_path[0],
+            #         epoch=epoch,
+            #         masked_channels_names=masked_channels_names,
+            #         img_idx=idx,
+            #     )
+            #     plt.close("all")
 
     val_loss = running_loss / len(test_dataloader)
-    val_mae = running_mae / len(test_dataloader)
-    val_mse = running_mse / len(test_dataloader)
+    
 
     all_latents = torch.cat(all_latents)
-    rankme = RankMe(all_latents)
+    all_preds = torch.cat(all_preds).cpu().numpy()
+    all_y = torch.cat(all_y).cpu().numpy()
+
+    log_finetuning_validation_metrics(
+            loss=loss.item(),
+            preds=all_preds,
+            y=all_y,
+            classes=classes,
+            step=step,
+        )
 
     # Calculate Pearson correlation between predicted variances and MAEs per channel
     all_channel_variances = torch.cat(all_channel_variances)
@@ -259,10 +281,7 @@ def test_masked(
 
     val_metrics = {
         "val_loss": val_loss,
-        "val_mae": val_mae,
-        "val_mse": val_mse,
-        "latent_rankme": rankme,
-        "variance_mae_correlation": variance_mae_corr,
+        "macro-f1": macroF1,
         "epoch": epoch,
     }
 
@@ -270,9 +289,7 @@ def test_masked(
 
     print(f"{'=' * 40} EPOCH {epoch + 1} {'=' * 40}")
     print(f"NLL: {val_loss:.4f}")
-    print(f"MAE: {val_mae:.6f}")
-    print(f"MSE: {val_mse:.6f}")
-    print(f"Pearson MAE vs Var: {variance_mae_corr:.4f}")
+    print(f"maro-f1: {macroF1:.4f}")
     print("=" * 90)
     print()
 
@@ -300,6 +317,9 @@ if __name__ == "__main__":
     TOKENIZER = YAML().load(open(config.tokenizer_config))
     INV_TOKENIZER = {v: k for k, v in TOKENIZER.items()}
 
+    MELTED_TABLE_PATH = ''
+    melted_table = pd.read_csv(MELTED_TABLE_PATH)
+
     train_transform = Compose(
         [
             RandomRotation(180, interpolation=InterpolationMode.BILINEAR),
@@ -308,114 +328,127 @@ if __name__ == "__main__":
         ]
     )
 
-    test_transform = TestCrop(SIZE[0])
+    test_transform = GridCrop(SIZE[0])
 
-    train_dataset = DatasetFromTIFF(
-        panels_config=PANEL_CONFIG,
-        split="train",
-        marker_tokenizer=TOKENIZER,
-        transform=train_transform,
-        use_preprocessing=False,  # saved data is already preprocessed
-        use_median_denoising=False,
-        use_butterworth_filter=True,
-        use_minmax_normalization=False,
-        use_clip_normalization=True,
-        file_extension="npy",
-    )
+    dataset_subsets = classifier_config.dataset_subsets
+    for subset, cli_feat_for_subset in dataset_subsets.items(): #dict
 
-    test_dataset = DatasetFromTIFF(
-        panels_config=PANEL_CONFIG,
-        split="test",
-        marker_tokenizer=TOKENIZER,
-        transform=test_transform,
-        use_preprocessing=False,  # saved data is already preprocessed
-        use_median_denoising=False,
-        use_butterworth_filter=True,
-        use_minmax_normalization=False,
-        use_clip_normalization=True,
-        file_extension="npy",
-    )
+        # make datasetform tiff take the subset
+        classes = melted_table[melted_table["dataset"].isin(subset)]
+        classes = classes[classes["value"]==cli_feat_for_subset]
+        classes = np.unique(classes["feature"])
 
-    train_batch_sampler = PanelBatchSampler(train_dataset, BATCH_SIZE)
-    test_batch_sampler = PanelBatchSampler(test_dataset, BATCH_SIZE, shuffle=False)
+        train_dataset = DatasetFromTIFF(
+            panels_config=PANEL_CONFIG,
+            split="train",
+            marker_tokenizer=TOKENIZER,
+            subset=subset,
+            transform=train_transform,
+            use_preprocessing=False,  # saved data is already preprocessed
+            use_median_denoising=False,
+            use_butterworth_filter=True,
+            use_minmax_normalization=False,
+            use_clip_normalization=True,
+            file_extension="npy",
+        )
 
-    train_dataloader = DataLoader(
-        train_dataset,
-        batch_sampler=train_batch_sampler,
-        num_workers=NUM_WORKERS,
-        pin_memory=True,
-        persistent_workers=True,
-        prefetch_factor=4,
-    )
-    test_dataloader = DataLoader(
-        test_dataset,
-        batch_sampler=test_batch_sampler,
-        num_workers=NUM_WORKERS,
-        pin_memory=True,
-        persistent_workers=True,
-        prefetch_factor=4,
-    )
+        test_dataset = DatasetFromTIFF(
+            panels_config=PANEL_CONFIG,
+            split="test",
+            marker_tokenizer=TOKENIZER,
+            subset=subset,
+            transform=test_transform,
+            use_preprocessing=False,  # saved data is already preprocessed
+            use_median_denoising=False,
+            use_butterworth_filter=True,
+            use_minmax_normalization=False,
+            use_clip_normalization=True,
+            file_extension="npy",
+        )
 
-    # Build model configuration
-    num_channels = len(TOKENIZER)
-    model = MultiplexAutoencoder(
-        num_channels=num_channels,
-        encoder_config=config.encoder_config.model_dump(),
-        decoder_config=config.decoder_config.model_dump(),
-    ).to(device)
+        train_batch_sampler = PanelBatchSampler(train_dataset, BATCH_SIZE)
+        test_batch_sampler = PanelBatchSampler(test_dataset, BATCH_SIZE, shuffle=False)
 
-    # Setup optimizer and scheduler
-    total_steps = (
-        len(train_dataloader) * config.epochs // config.gradient_accumulation_steps
-    )
-    num_warmup_steps = int(total_steps * config.frac_warmup_steps)
-    num_annealing_steps = total_steps - num_warmup_steps
+        train_dataloader = DataLoader(
+            train_dataset,
+            batch_sampler=train_batch_sampler,
+            num_workers=NUM_WORKERS,
+            pin_memory=True,
+            persistent_workers=True,
+            prefetch_factor=4,
+        )
+        test_dataloader = DataLoader(
+            test_dataset,
+            batch_sampler=test_batch_sampler,
+            num_workers=NUM_WORKERS,
+            pin_memory=True,
+            persistent_workers=True,
+            prefetch_factor=4,
+        )
 
-    optimizer = optim.AdamW(
-        model.parameters(), lr=config.peak_lr, weight_decay=config.weight_decay
-    )
-    scheduler = get_scheduler_with_warmup(
-        optimizer,
-        num_warmup_steps,
-        num_annealing_steps,
-        final_lr=config.final_lr,
-        peak_lr=config.peak_lr,
-        type="cosine",
-    )
+        # Build model configuration
+        num_channels = len(TOKENIZER)
+        model = Finetuning(
+            num_channels=num_channels,
+            encoder_config=config.encoder_config.model_dump(),
+            classifier_config=config.classifier_config.model_dump(),
+        ).to(device)
 
-    # Initialize Comet.ml experiment
-    comet_config = config.model_dump()
-    init_experiment(comet_config)
+        # Setup optimizer and scheduler
+        total_steps = (
+            len(train_dataloader) * config.epochs // config.gradient_accumulation_steps
+        )
+        num_warmup_steps = int(total_steps * config.frac_warmup_steps)
+        num_annealing_steps = total_steps - num_warmup_steps
 
-    # Load checkpoint if specified
-    start_epoch = 0
-    if config.resolve_checkpoint():
-        print(f"Loading model from checkpoint: {config.from_checkpoint}")
-        checkpoint = torch.load(config.from_checkpoint, map_location=device)
-        model.load_state_dict(checkpoint["model_state_dict"])
-        optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
-        scheduler.load_state_dict(checkpoint["scheduler_state_dict"])
-        start_epoch = checkpoint["epoch"] + 1
+        optimizer = optim.AdamW(
+            model.parameters(), lr=config.peak_lr, weight_decay=config.weight_decay
+        )
+        scheduler = get_scheduler_with_warmup(
+            optimizer,
+            num_warmup_steps,
+            num_annealing_steps,
+            final_lr=config.final_lr,
+            peak_lr=config.peak_lr,
+            type="cosine",
+        )
 
-    # Train the model
-    train_masked(
-        model,
-        optimizer,
-        scheduler,
-        train_dataloader,
-        test_dataloader,
-        device,
-        marker_names_map=INV_TOKENIZER,
-        epochs=config.epochs,
-        start_epoch=start_epoch,
-        gradient_accumulation_steps=config.gradient_accumulation_steps,
-        min_channels_frac=config.min_channels_frac,
-        spatial_masking_ratio=config.spatial_masking_ratio,
-        fully_masked_channels_max_frac=config.fully_masked_channels_max_frac,
-        mask_patch_size=config.mask_patch_size,
-        save_checkpoint_every=config.save_checkpoint_freq,
-        checkpoints_path=config.checkpoints_dir,
-        beta=config.beta,
-    )
+        # Initialize Comet.ml experiment
+        comet_config = config.model_dump()
+        init_experiment(comet_config)
 
-    finish_experiment()
+        # Load checkpoint if specified
+        start_epoch = 0
+        if config.resolve_checkpoint():
+            print(f"Loading model from checkpoint: {config.from_checkpoint}")
+            checkpoint = torch.load(config.from_checkpoint, map_location=device)
+            model.load_state_dict(checkpoint["model_state_dict"])
+            optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
+            scheduler.load_state_dict(checkpoint["scheduler_state_dict"])
+            start_epoch = checkpoint["epoch"] + 1
+
+        # Train the model
+        train_masked(
+            model,
+            optimizer,
+            scheduler,
+            train_dataloader,
+            test_dataloader,
+            device,
+            cli_feat_for_subset,
+            melted_table,
+            classes,
+            marker_names_map=INV_TOKENIZER,
+            epochs=config.epochs,
+            start_epoch=start_epoch,
+            gradient_accumulation_steps=config.gradient_accumulation_steps,
+            min_channels_frac=config.min_channels_frac,
+            spatial_masking_ratio=config.spatial_masking_ratio,
+            fully_masked_channels_max_frac=config.fully_masked_channels_max_frac,
+            mask_patch_size=config.mask_patch_size,
+            save_checkpoint_every=config.save_checkpoint_freq,
+            checkpoints_path=config.checkpoints_dir,
+            beta=config.beta,
+        )
+
+        finish_experiment()

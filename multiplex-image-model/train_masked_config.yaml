@@ -22,6 +22,10 @@ decoder:
       stride: 1
       use_bias: true
 
+classifier:
+  input_dim: 768
+  hidden_dims: [1024,512,128]
+
 # Data configuration
 panel_config: configs/all_panels_config.yaml
 tokenizer_config: configs/all_markers_tokenizer.yaml

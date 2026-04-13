@@ -25,8 +25,10 @@ from .train_logging import (
     get_run_name,
     init_experiment,
     log_training_metrics,
+    log_finetuning_training_metrics,
     log_validation_images,
     log_validation_metrics,
+    log_finetuning_validation_metrics,
     plot_reconstructs_with_masks,
     plot_reconstructs_with_uncertainty,
 )

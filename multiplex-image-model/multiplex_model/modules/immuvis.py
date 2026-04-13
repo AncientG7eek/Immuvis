@@ -291,8 +291,8 @@ class Classifier(nn.Module):
 
     def forward(self, x):
         x = self.mlp(x)
-        
-        return self.logsoftmax(x)
+        logits = self.logsoftmax(x)
+        return logits
 
 
 class MultiplexImageDecoder(nn.Module):
@@ -497,6 +497,7 @@ class Finetuning(nn.Module):
     def __init__(
         self,
         num_channels: int,
+        num_classes: int,
         encoder_config: dict,
         classifier_config: dict,
     ):
@@ -510,15 +511,17 @@ class Finetuning(nn.Module):
         super().__init__()
         self.latent_dim = encoder_config["pm_embedding_dims"][-1]
         self.num_channels = num_channels
+
+        self.input_dim = self.latent_dim
         self.hidden_dims = classifier_config["hidden_dims"]
-        self.num_classes = classifier_config["num_classes"]
+        self.num_classes = num_classes
 
         self.encoder = MultiplexImageEncoder(
             num_channels=self.num_channels, **encoder_config
         )
 
         self.classifier = Classifier(
-            input_dim = self.hidden_dims,
+            input_dim = self.input_dim,
             hidden_dims= self.hidden_dims,
             num_classes= self.num_classes,
         )
@@ -549,8 +552,8 @@ class Finetuning(nn.Module):
             outputs["features"] = encoding_output["features"]
         return outputs
     
-    def forward(self, x):
-        emb = self.encoder(x)
+    def forward(self, x, encoded_indices):
+        emb = self.encode(x, encoded_indices)
         pred = self.classifier(emb)
 
         return pred

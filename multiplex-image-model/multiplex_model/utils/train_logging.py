@@ -370,6 +370,46 @@ def log_validation_metrics(
         metrics["val/variance_mae_correlation"] = variance_mae_correlation
     _experiment.log_metrics(metrics, epoch=epoch)
 
+def log_finetuning_validation_metrics(
+    val_loss: float,
+    val_preds: np.array,
+    val_y: np.array,
+    classes: np.array,
+    epoch: int,
+) -> None:
+    """Log validation metrics to Comet.ml.
+
+    Args:
+        val_loss (float): Validation loss
+        val_macroF1 (float): Validation macro-f1 score
+        epoch (int): Current epoch number
+        variance_mae_correlation (Optional[float]): Pearson correlation between predicted variances and MAEs per channel
+    """
+    if _experiment is None:
+        return
+
+    num_classes = len(classes)
+    mapping = {c.item(): i for i, c in enumerate(classes)}
+    confusion_matrix = np.zeros((num_classes, num_classes), dtype=int)
+    for truth, pred in zip(val_y, val_preds):
+        confusion_matrix[mapping(truth), mapping(pred)] += 1
+
+    TP = np.diag(confusion_matrix)
+    FP = confusion_matrix.sum(axis=0) - TP
+    FN = confusion_matrix.sum(axis=1) - TP
+    
+    precision = TP / (TP+FP)
+    recall = TP / (TP+FN)
+
+    F1score = 2*precision*recall / (precision+recall)
+    val_macroF1 = np.mean(F1score)
+
+
+    metrics = {
+        "val/loss": val_loss,
+        "val/macroF1": val_macroF1,
+    }
+    _experiment.log_metrics(metrics, epoch=epoch)
 
 def log_validation_images(
     fig: plt.Figure,

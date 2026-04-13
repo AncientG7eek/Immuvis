@@ -167,6 +167,38 @@ class DecoderConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
 
+class ClassifierConfig(BaseModel):
+    """Configuration for Classifier."""
+
+    decoded_embed_dim: int = Field(
+        ..., gt=0, description="Embedding dimension of decoded tensor"
+    )
+    num_blocks: int = Field(
+        ..., gt=0, description="Number of ConvNeXt blocks in decoder"
+    )
+    hyperkernel_config: HyperkernelConfig = Field(
+        ..., description="Hyperkernel configuration", alias="hyperkernel"
+    )
+    num_outputs: int = Field(
+        default=2, gt=0, description="Number of outputs per marker channel"
+    )
+    block_type: str | ModuleConfig | None = Field(
+        default="convnext",
+        description="Block type to use in decoder. Can be string or dict with 'type' and 'module_parameters'.",
+    )
+
+    @field_validator("block_type", mode="before")
+    @classmethod
+    def validate_block_type(cls, v) -> ModuleConfig:
+        if v is None:
+            return ModuleConfig(type="convnext")
+        if isinstance(v, ModuleConfig):
+            return v
+        return ModuleConfig.from_string_or_dict(v)
+
+    model_config = ConfigDict(extra="forbid")
+
+
 class TrainingConfig(BaseModel):
     """Pydantic model for training configuration with validation."""
 
@@ -219,6 +251,10 @@ class TrainingConfig(BaseModel):
     )
     decoder_config: DecoderConfig = Field(
         ..., description="Decoder configuration", alias="decoder"
+    )
+
+    classifier_config: ClassifierConfig = Field(
+        ..., description="Classifier configuration", alias="classifier"
     )
 
     # Checkpoint parameters
