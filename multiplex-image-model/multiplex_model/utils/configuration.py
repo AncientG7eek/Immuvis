@@ -168,33 +168,18 @@ class DecoderConfig(BaseModel):
 
 
 class ClassifierConfig(BaseModel):
-    """Configuration for Classifier."""
+    """Configuration for simple MLP Classifier for finetuning."""
 
-    decoded_embed_dim: int = Field(
-        ..., gt=0, description="Embedding dimension of decoded tensor"
-    )
-    num_blocks: int = Field(
-        ..., gt=0, description="Number of ConvNeXt blocks in decoder"
-    )
-    hyperkernel_config: HyperkernelConfig = Field(
-        ..., description="Hyperkernel configuration", alias="hyperkernel"
-    )
-    num_outputs: int = Field(
-        default=2, gt=0, description="Number of outputs per marker channel"
-    )
-    block_type: str | ModuleConfig | None = Field(
-        default="convnext",
-        description="Block type to use in decoder. Can be string or dict with 'type' and 'module_parameters'.",
+    hidden_dims: list[int] = Field(
+        ..., description="Hidden layer dimensions (e.g., [512, 256])"
     )
 
-    @field_validator("block_type", mode="before")
+    @field_validator("hidden_dims")
     @classmethod
-    def validate_block_type(cls, v) -> ModuleConfig:
-        if v is None:
-            return ModuleConfig(type="convnext")
-        if isinstance(v, ModuleConfig):
-            return v
-        return ModuleConfig.from_string_or_dict(v)
+    def validate_hidden_dims(cls, v: list[int]) -> list[int]:
+        if any(x <= 0 for x in v):
+            raise ValueError("All hidden dimensions must be positive")
+        return v
 
     model_config = ConfigDict(extra="forbid")
 
@@ -249,12 +234,17 @@ class TrainingConfig(BaseModel):
     encoder_config: EncoderConfig = Field(
         ..., description="Encoder configuration", alias="encoder"
     )
-    decoder_config: DecoderConfig = Field(
-        ..., description="Decoder configuration", alias="decoder"
+    decoder_config: DecoderConfig | None = Field(
+        None, description="Decoder configuration (for autoencoder training)", alias="decoder"
     )
 
     classifier_config: ClassifierConfig = Field(
         ..., description="Classifier configuration", alias="classifier"
+    )
+    
+    # Dataset configuration for finetuning
+    dataset_subsets: list[list] = Field(
+        ..., description="Dataset subsets and features for classification (e.g., [['danenberg', 'feature_name']]"
     )
 
     # Checkpoint parameters

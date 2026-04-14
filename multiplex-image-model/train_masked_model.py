@@ -21,7 +21,7 @@ from torchvision.transforms.functional import InterpolationMode
 from tqdm import tqdm
 
 from multiplex_model.clinical import concat_metadata, merge_metadata_with_melted, get_a_subset
-from multiplex_model.data import DatasetFromTIFF, PanelBatchSampler, TestCrop
+from multiplex_model.data import DatasetFromTIFF, PanelBatchSampler, TestCrop, GridCrop
 from multiplex_model.losses import RankMe, beta_nll_loss, nll_loss
 from multiplex_model.modules.immuvis import Finetuning
 from multiplex_model.utils import (
@@ -33,8 +33,7 @@ from multiplex_model.utils import (
     get_run_name,
     get_scheduler_with_warmup,
     init_experiment,
-    log_finetuning_training_metrics,
-    log_finetuning_validation_images,
+    log_finetuning_validation_metrics,
     log_validation_metrics,
     plot_reconstructs_with_masks,
 )
@@ -77,27 +76,41 @@ def train_masked(
         model.train()
         all_preds = []
         all_y = []
-        for batch_idx, (img, channel_ids, panel_idx, img_path) in enumerate(
+        for batch_idx, batch_data in enumerate(
             tqdm(train_dataloader, desc=f"Epoch {epoch}")
         ):
+            # Handle both GridCrop (with coords) and regular transforms
+            if len(batch_data) == 5:  # GridCrop: (crops, coords, channel_ids, dataset, img_path)
+                img, coords, channel_ids, panel_idx, img_path = batch_data
+            else:  # Regular: (img, channel_ids, dataset, img_path)
+                img, channel_ids, panel_idx, img_path = batch_data
+            
             img = img.to(device, dtype=torch.float32)
             channel_ids = channel_ids.to(device, dtype=torch.long)
+            
+            # Handle batch of crops: reshape (batch_size, num_crops, C, H, W) -> (batch_size * num_crops, C, H, W)
+            if img.dim() == 5:  # (batch, num_crops, C, H, W)
+                batch_size, num_crops = img.shape[0], img.shape[1]
+                img = img.view(batch_size * num_crops, *img.shape[2:])
+                # Repeat channel_ids and img_path for each crop
+                if isinstance(channel_ids, torch.Tensor) and channel_ids.dim() == 1:
+                    channel_ids = channel_ids.unsqueeze(0).repeat(batch_size * num_crops, 1).squeeze()
+                img_path = [p for p in img_path for _ in range(num_crops)] if isinstance(img_path, list) else img_path
 
             # here use img_path to get clinical 
-            all_cli_features = get_a_subset(melted_table, "img_path", img_path) # make the function cope with batch of values, 
+            all_cli_features = get_a_subset(melted_table, "img_path", img_path)
             selected_cli_feat = get_a_subset(all_cli_features, "feature", cli_feat_for_subset)
-            y = selected_cli_feat["value"]
+            y = torch.tensor(selected_cli_feat["value"].values, device=device, dtype=torch.long)
 
-            loss_fn = torch.nn.NLLLoss()
+            loss_fn = torch.nn.CrossEntropyLoss()
 
             with autocast(device_type="cuda", dtype=torch.bfloat16):
-                
                 logits = model(x=img, encoded_indices=channel_ids)
-                preds = torch.argmax(logits, dim=1)
-                loss = loss_fn(preds, y)
+                loss = loss_fn(logits, y)
 
-                all_preds.append(preds.cpu())
-                all_y.append(y.cpu())
+            preds = torch.argmax(logits.detach(), dim=1)
+            all_preds.append(preds.cpu())
+            all_y.append(y.cpu())
 
             scaler.scale(loss / gradient_accumulation_steps).backward()
 
@@ -114,13 +127,16 @@ def train_masked(
         all_preds = torch.cat(all_preds).cpu().numpy()
         all_y = torch.cat(all_y).cpu().numpy()
 
-        log_finetuning_validation_metrics(
+        metrics = log_finetuning_validation_metrics(
             loss=loss.item(),
             preds=all_preds,
             y=all_y,
             classes=classes,
             step=step,
         )
+
+        print(f"Loss; {metrics['val/loss']}")
+        print(f"macro-f1: {metrics['val/macroF1']}")
             
 
         test_masked(
@@ -128,10 +144,11 @@ def train_masked(
             val_dataloader,
             device,
             epoch,
-            spatial_masking_ratio=spatial_masking_ratio,
-            fully_masked_channels_max_frac=fully_masked_channels_max_frac,
-            mask_patch_size=mask_patch_size,
-            marker_names_map=marker_names_map,
+            marker_names_map=INV_TOKENIZER,
+            melted_table=melted_table,
+            cli_feat_for_subset=cli_feat_for_subset,
+            classes=classes,
+            step=step,
         )
 
         checkpoint = {
@@ -161,90 +178,59 @@ def test_masked(
     device,
     epoch,
     marker_names_map,
+    melted_table,
+    cli_feat_for_subset,
+    classes,
+    step,
     num_plots=4,
     spatial_masking_ratio=0.6,
     fully_masked_channels_max_frac=0.5,
     mask_patch_size=8,
 ):
+    """Validate the finetuning model on the test set."""
     model.eval()
     running_loss = 0.0
-    running_mae = 0.0
-    running_mse = 0.0
-    plot_indices = np.random.choice(
-        np.arange(len(test_dataloader)), size=num_plots, replace=False
-    )
-    plot_indices = set(plot_indices)
-
-    all_latents = []
     all_preds = []
     all_y = []
 
+    loss_fn = torch.nn.CrossEntropyLoss()
 
     with torch.no_grad():
-        for idx, (img, channel_ids, panel_idx, img_path) in enumerate(
+        for idx, batch_data in enumerate(
             tqdm(test_dataloader, desc=f"Testing epoch {epoch}")
         ):
+            # Handle both GridCrop (with coords) and regular transforms
+            if len(batch_data) == 5:  # GridCrop: (crops, coords, channel_ids, dataset, img_path)
+                img, coords, channel_ids, panel_idx, img_path = batch_data
+            else:  # Regular: (img, channel_ids, dataset, img_path)
+                img, channel_ids, panel_idx, img_path = batch_data
+            
             img = img.to(device, dtype=torch.float32)
             channel_ids = channel_ids.to(device, dtype=torch.long)
+            
+            # Handle batch of crops: reshape (batch_size, num_crops, C, H, W) -> (batch_size * num_crops, C, H, W)
+            if img.dim() == 5:  # (batch, num_crops, C, H, W)
+                batch_size, num_crops = img.shape[0], img.shape[1]
+                img = img.view(batch_size * num_crops, *img.shape[2:])
+                # Repeat channel_ids and img_path for each crop
+                if isinstance(channel_ids, torch.Tensor) and channel_ids.dim() == 1:
+                    channel_ids = channel_ids.unsqueeze(0).repeat(batch_size * num_crops, 1).squeeze()
+                img_path = [p for p in img_path for _ in range(num_crops)] if isinstance(img_path, list) else img_path
 
-            # # Apply channel masking (only full channel masking for validation, no channel dropping)
-            # _, _, masked_img, active_channel_ids = apply_channel_masking(
-            #     img,
-            #     channel_ids,
-            #     fully_masked_channels_max_frac=fully_masked_channels_max_frac,
-            #     apply_channel_subset_sampling=False,
-            # )
-
-            # # Apply spatial masking
-            # masked_img, pixel_mask = apply_spatial_masking(
-            #     masked_img, spatial_masking_ratio, mask_patch_size
-            # )
-
-            all_cli_features = get_a_subset(melted_table, "img_path", img_path) # make the function cope with batch of values, 
+            # Get clinical features from melted table
+            all_cli_features = get_a_subset(melted_table, "img_path", img_path)
             selected_cli_feat = get_a_subset(all_cli_features, "feature", cli_feat_for_subset)
-            y = selected_cli_feat["value"]
+            y = torch.tensor(selected_cli_feat["value"].values, device=device, dtype=torch.long)
 
-            loss_fn = torch.nn.NLLLoss()
+            # Forward pass (no autocast needed in eval mode with no_grad)
+            logits = model(x=img, encoded_indices=channel_ids)
+            loss = loss_fn(logits, y)
 
-            with autocast(device_type="cuda", dtype=torch.bfloat16):
-                
-                logits = model(x=img, encoded_indices=channel_ids)
-                preds = torch.argmax(logits, dim=1)
-                loss = loss_fn(preds, y)
+            preds = torch.argmax(logits, dim=1)
+            all_preds.append(preds.cpu())
+            all_y.append(y.cpu())
 
-                all_preds.append(preds.cpu())
-                all_y.append(y.cpu())
-                
-
-            # # Accumulate per-channel statistics for correlation analysis
-            # variance_per_channel = torch.exp(logvar).mean(
-            #     dim=(0, 2, 3)
-            # )  # Mean variance per channel
-            # mae_per_channel = torch.abs(img - mi).mean(dim=(0, 2, 3))  # MAE per channel
-            # all_channel_variances.append(variance_per_channel.cpu())
-            # all_channel_maes.append(mae_per_channel.cpu())
-
-            # loss = nll_loss(img, mi, logvar)
             running_loss += loss.item()
-            # running_mae += torch.abs(img - mi).mean().item()
-            # running_mse += torch.square(img - mi).mean().item()
-
-            # if idx in plot_indices:
-            #     unactive_channels = [
-            #         i for i in channel_ids[0] if i not in active_channel_ids[0]
-            #     ]
-            #     masked_channels_names = " | ".join(
-            #         [marker_names_map[i.item()] for i in unactive_channels]
-            #     )
-
-            #     reconstr_img = plot_reconstructs_with_masks(
-            #         img,
-            #         mi,
-            #         pixel_mask,
-            #         channel_ids,
-            #         unactive_channels,
-            #         markers_names_map=marker_names_map,
-            #         ncols=9,
             #     )
             #     log_validation_images(
             #         fig=reconstr_img,
@@ -257,39 +243,22 @@ def test_masked(
             #     plt.close("all")
 
     val_loss = running_loss / len(test_dataloader)
-    
 
-    all_latents = torch.cat(all_latents)
     all_preds = torch.cat(all_preds).cpu().numpy()
     all_y = torch.cat(all_y).cpu().numpy()
 
-    log_finetuning_validation_metrics(
-            loss=loss.item(),
-            preds=all_preds,
-            y=all_y,
-            classes=classes,
-            step=step,
-        )
-
-    # Calculate Pearson correlation between predicted variances and MAEs per channel
-    all_channel_variances = torch.cat(all_channel_variances)
-    all_channel_maes = torch.cat(all_channel_maes)
-    # Calculate Pearson correlation using flattened data across all batches
-    variance_mae_corr = torch.corrcoef(
-        torch.stack([all_channel_variances.flatten(), all_channel_maes.flatten()])
-    )[0, 1].item()
-
-    val_metrics = {
-        "val_loss": val_loss,
-        "macro-f1": macroF1,
-        "epoch": epoch,
-    }
-
-    log_validation_metrics(**val_metrics)
+    val_metrics = log_finetuning_validation_metrics(
+        loss=val_loss,
+        preds=all_preds,
+        y=all_y,
+        classes=classes,
+        step=step,
+    )
 
     print(f"{'=' * 40} EPOCH {epoch + 1} {'=' * 40}")
     print(f"NLL: {val_loss:.4f}")
-    print(f"maro-f1: {macroF1:.4f}")
+    if "val/macroF1" in val_metrics:
+        print(f"macro-f1: {val_metrics['val/macroF1']:.4f}")
     print("=" * 90)
     print()
 
@@ -317,7 +286,7 @@ if __name__ == "__main__":
     TOKENIZER = YAML().load(open(config.tokenizer_config))
     INV_TOKENIZER = {v: k for k, v in TOKENIZER.items()}
 
-    MELTED_TABLE_PATH = ''
+    MELTED_TABLE_PATH = '/home/kacper/Documents/oświata/UW/2nd_yr/magisterka/Immuvis/melted_table/results/melted_table.csv'
     melted_table = pd.read_csv(MELTED_TABLE_PATH)
 
     train_transform = Compose(
@@ -330,11 +299,11 @@ if __name__ == "__main__":
 
     test_transform = GridCrop(SIZE[0])
 
-    dataset_subsets = classifier_config.dataset_subsets
-    for subset, cli_feat_for_subset in dataset_subsets.items(): #dict
+    dataset_subsets = config.dataset_subsets
+    for subset, cli_feat_for_subset in dataset_subsets: #dict
 
         # make datasetform tiff take the subset
-        classes = melted_table[melted_table["dataset"].isin(subset)]
+        classes = melted_table[melted_table["dataset"]==(subset)]
         classes = classes[classes["value"]==cli_feat_for_subset]
         classes = np.unique(classes["feature"])
 
@@ -388,11 +357,33 @@ if __name__ == "__main__":
 
         # Build model configuration
         num_channels = len(TOKENIZER)
+        num_classes = len(classes)
+        
         model = Finetuning(
             num_channels=num_channels,
+            num_classes=num_classes,
             encoder_config=config.encoder_config.model_dump(),
             classifier_config=config.classifier_config.model_dump(),
         ).to(device)
+        
+        # Load pretrained encoder weights if specified
+        if config.resolve_checkpoint():
+            print(f"Loading encoder weights from: {config.from_checkpoint}")
+            checkpoint = torch.load(config.from_checkpoint, map_location=device)
+            encoder_state_dict = checkpoint.get("model_state_dict", checkpoint)
+            # Filter to only encoder weights
+            encoder_keys = {k: v for k, v in encoder_state_dict.items() if "encoder." in k}
+            if encoder_keys:
+                model.encoder.load_state_dict(encoder_keys)
+                print(f"Loaded {len(encoder_keys)} encoder parameters")
+            else:
+                # Try loading full state dict (assumes it's just the encoder)
+                try:
+                    model.encoder.load_state_dict(encoder_state_dict)
+                    print(f"Loaded encoder state dict")
+                except Exception as e:
+                    print(f"Warning: Could not load encoder: {e}")
+
 
         # Setup optimizer and scheduler
         total_steps = (

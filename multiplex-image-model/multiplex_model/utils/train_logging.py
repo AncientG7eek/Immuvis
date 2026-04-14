@@ -411,6 +411,8 @@ def log_finetuning_validation_metrics(
     }
     _experiment.log_metrics(metrics, epoch=epoch)
 
+    return metrics
+
 def log_validation_images(
     fig: plt.Figure,
     panel_idx: int,

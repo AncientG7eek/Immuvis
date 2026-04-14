@@ -1,0 +1,64 @@
+# Training Configuration for Finetuning
+
+# Device and data
+device: cuda:0
+input_image_size: [256, 256]
+batch_size: 8
+num_workers: 4
+
+# Config file paths
+panel_config: "configs/panel_config.yaml"
+tokenizer_config: "configs/tokenizer.yaml"
+
+# Training parameters
+lr: 1.0e-3  # peak learning rate
+final_lr: 1.0e-5
+frac_warmup_steps: 0.1
+weight_decay: 1.0e-4
+gradient_accumulation_steps: 2
+epochs: 50
+beta: 1.0  # Not used in finetuning but required by config
+
+# Masking parameters (not used in finetuning but required)
+min_channels_frac: 0.75
+spatial_masking_ratio: 0.6
+fully_masked_channels_max_frac: 0.5
+mask_patch_size: 8
+
+# Model architecture
+encoder:
+  ma_layers_blocks: [2, 2, 2]
+  ma_embedding_dims: [64, 128, 256]
+  pm_layers_blocks: [3, 4, 6]
+  pm_embedding_dims: [96, 192, 384]
+  hyperkernel:
+    kernel_size: 1
+    padding: 0
+    stride: 1
+    use_bias: true
+  use_latent_norm: true
+  encoder_type: convnext
+
+# Decoder: not used in finetuning (set to null or omit)
+decoder: null
+
+# Classifier configuration
+classifier:
+  hidden_dims: [512, 256]  # Will create: latent_dim -> 512 -> 256 -> num_classes
+
+# Dataset subsets for finetuning
+dataset_subsets:
+  train: "feature_name"  # Replace with your feature name (e.g., "Grade")
+  val: "feature_name"
+
+# Checkpoint paths
+from_checkpoint: "path/to/pretrained_encoder.pth"  # Path to encoder weights
+checkpoints_dir: "./checkpoints/finetuning"
+save_checkpoint_freq: 5
+
+# Comet.ml logging
+comet_project: "immuvis-finetuning"
+comet_workspace: null
+comet_api_key: null
+tags: ["finetuning", "classifier"]
+run_name: null

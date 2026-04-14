@@ -287,7 +287,7 @@ class Classifier(nn.Module):
                 for i in range(len(hidden_dims)-1)
             ]
         )
-        self.logsoftmax = nn.LogSoftmax()
+        self.logsoftmax = nn.LogSoftmax(dim=1)
 
     def forward(self, x):
         x = self.mlp(x)
@@ -554,6 +554,10 @@ class Finetuning(nn.Module):
     
     def forward(self, x, encoded_indices):
         emb = self.encode(x, encoded_indices)
-        pred = self.classifier(emb)
-
+        # Extract the embedding tensor from dict and flatten spatial dimensions if needed
+        output_tensor = emb["output"]
+        # Flatten spatial dimensions if present (e.g., shape: (B, D, 1, 1) -> (B, D))
+        if output_tensor.dim() > 2:
+            output_tensor = output_tensor.view(output_tensor.size(0), -1)
+        pred = self.classifier(output_tensor)
         return pred
