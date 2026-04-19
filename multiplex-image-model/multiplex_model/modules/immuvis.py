@@ -556,8 +556,8 @@ class Finetuning(nn.Module):
         emb = self.encode(x, encoded_indices)
         # Extract the embedding tensor from dict and flatten spatial dimensions if needed
         output_tensor = emb["output"]
-        # Flatten spatial dimensions if present (e.g., shape: (B, D, 1, 1) -> (B, D))
+        # Flatten spatial dimensions if present (e.g., shape: (B, D, H, W) -> (B, D*H*W))
         if output_tensor.dim() > 2:
-            output_tensor = output_tensor.view(output_tensor.size(0), -1)
+            output_tensor = output_tensor.mean(dim=[2,3])
         pred = self.classifier(output_tensor)
         return pred

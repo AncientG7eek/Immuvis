@@ -26,12 +26,12 @@ classifier:
   hidden_dims: [512,128]
 
 # Data configuration
-dataset_subsets: [['danenberg','Grade']]
+dataset_subsets: [['jackson-basel','grade']]
 panel_config: configs/all_panels_config.yaml
 tokenizer_config: configs/all_markers_tokenizer.yaml
 input_image_size: [64, 64]
 num_workers: 8
-batch_size: 8
+batch_size: 1
 
 # Training configuration
 device: cpu
@@ -51,7 +51,7 @@ save_checkpoint_freq: 5
 beta: 1.0
 
 # Comet.ml logging configuration
-tags: [...]
-comet_project: ...
+tags: [first-run]
+comet_project: 'immuvis-finetuning'
 comet_workspace: null  # optional, can also be set via COMET_WORKSPACE env var
 comet_api_key: null  # optional, can also be set via COMET_API_KEY env var

@@ -80,7 +80,21 @@ def merge_metadata_with_melted(emb_metadata: pd.DataFrame, melted_table: pd.Data
 
 def get_a_subset(meta_table: pd.DataFrame, column: str, value: str|list):
     if isinstance(value, str):
-        return meta_table[meta_table[column]==value]
+        return meta_table[meta_table[column].astype(str)==value]
     if isinstance(value, list):
-        return meta_table[meta_table[column].isin(value)]
+        return meta_table[meta_table[column].astype(str).isin(value)]
         
+
+class LabelEncoder():
+    def __init__(self, classes):
+        self.dict = {cls:i for i,cls in enumerate(sorted(set(classes)))}
+        self.inv_dict = {i:cls for cls,i in self.dict.items()}
+
+    def encode(self, labels):
+        return [self.dict[label] for label in labels]
+    
+    def decode(self, labels):
+        return [self.inv_dict[label] for label in labels]
+    
+    def get_dict(self):
+        return self.dict

@@ -20,7 +20,7 @@ from torchvision.transforms import (
 from torchvision.transforms.functional import InterpolationMode
 from tqdm import tqdm
 
-from multiplex_model.clinical import concat_metadata, merge_metadata_with_melted, get_a_subset
+from multiplex_model.clinical import LabelEncoder, concat_metadata, merge_metadata_with_melted, get_a_subset
 from multiplex_model.data import DatasetFromTIFF, PanelBatchSampler, TestCrop, GridCrop
 from multiplex_model.losses import RankMe, beta_nll_loss, nll_loss
 from multiplex_model.modules.immuvis import Finetuning
@@ -65,6 +65,9 @@ def train_masked(
     model.train()
     scaler = GradScaler()
     run_name = get_run_name()
+    print(f"classes: {classes}")
+    label_encoder = LabelEncoder(classes)
+    print(f"label dict: {label_encoder.get_dict()}")
 
     if not os.path.exists(checkpoints_path):
         os.makedirs(checkpoints_path, exist_ok=True)
@@ -76,6 +79,7 @@ def train_masked(
         model.train()
         all_preds = []
         all_y = []
+        print(len(train_dataloader))
         for batch_idx, batch_data in enumerate(
             tqdm(train_dataloader, desc=f"Epoch {epoch}")
         ):
@@ -86,7 +90,9 @@ def train_masked(
                 img, channel_ids, panel_idx, img_path = batch_data
             
             img = img.to(device, dtype=torch.float32)
+            print(f"num crops: {len(img)}", flush=True)
             channel_ids = channel_ids.to(device, dtype=torch.long)
+            print(f"img shape: {img.shape}")
             
             # Handle batch of crops: reshape (batch_size, num_crops, C, H, W) -> (batch_size * num_crops, C, H, W)
             if img.dim() == 5:  # (batch, num_crops, C, H, W)
@@ -95,18 +101,36 @@ def train_masked(
                 # Repeat channel_ids and img_path for each crop
                 if isinstance(channel_ids, torch.Tensor) and channel_ids.dim() == 1:
                     channel_ids = channel_ids.unsqueeze(0).repeat(batch_size * num_crops, 1).squeeze()
-                img_path = [p for p in img_path for _ in range(num_crops)] if isinstance(img_path, list) else img_path
-
+                img_path = [p.split("/")[-1].split('.')[0] for p in img_path for _ in range(num_crops)] if isinstance(img_path, list) else img_path.split("/")[-1].split('.')[0]
+            else:
+                img_path = [p.split("/")[-1].split('.')[0] for p in img_path]
+                
+            print(img_path)
             # here use img_path to get clinical 
-            all_cli_features = get_a_subset(melted_table, "img_path", img_path)
+            all_cli_features = get_a_subset(melted_table, "img_name", img_path)
+            print(f"all cli feat: {all_cli_features}")
+            
             selected_cli_feat = get_a_subset(all_cli_features, "feature", cli_feat_for_subset)
-            y = torch.tensor(selected_cli_feat["value"].values, device=device, dtype=torch.long)
-
+            print(f"selected cli feat: {selected_cli_feat}")
+            print("Encoding labels")
+            label_per_crop = []
+            for img_p in img_path:
+                per_crop = selected_cli_feat[selected_cli_feat["img_name"].astype(str)==img_p]
+                print(f"per crop: {per_crop}")
+                label_per_crop.append(per_crop)
+            label_per_crop = pd.concat(label_per_crop)
+            print(f"label per crop: {label_per_crop}")
+            print(f"labels to encode: {label_per_crop["value"]}")
+            y = torch.tensor(label_encoder.encode(label_per_crop["value"].values), device=device, dtype=torch.long)
+            print(f"encoded labels: {y}")
             loss_fn = torch.nn.CrossEntropyLoss()
 
             with autocast(device_type="cuda", dtype=torch.bfloat16):
+                print("Calculating logits")
                 logits = model(x=img, encoded_indices=channel_ids)
+                print("Calculating loss")
                 loss = loss_fn(logits, y)
+            print("Calculating preds")
 
             preds = torch.argmax(logits.detach(), dim=1)
             all_preds.append(preds.cpu())
@@ -128,11 +152,11 @@ def train_masked(
         all_y = torch.cat(all_y).cpu().numpy()
 
         metrics = log_finetuning_validation_metrics(
-            loss=loss.item(),
-            preds=all_preds,
-            y=all_y,
-            classes=classes,
-            step=step,
+            val_loss=loss.item(),
+            val_preds=all_preds,
+            val_y=all_y,
+            label_encoder=label_encoder,
+            epoch=epoch,
         )
 
         print(f"Loss; {metrics['val/loss']}")
@@ -251,7 +275,7 @@ def test_masked(
         loss=val_loss,
         preds=all_preds,
         y=all_y,
-        classes=classes,
+        label_encoder=LabelEncoder,
         step=step,
     )
 
@@ -263,6 +287,55 @@ def test_masked(
     print()
 
     return val_metrics
+
+
+def custom_collate(batch):
+    """
+    batch: list of tuples returned by DatasetFromTIFF.__getitem__:
+      (crops: Tensor[n_crops, C, H, W],
+       coords: np.ndarray[n_crops, ...] or list,
+       channel_ids: Tensor[C],
+       dataset: list_of_len_n_crops or list_of_len_n_crops,
+       img_path: list_of_len_n_crops)
+    Return:
+      crops: Tensor[N_total_crops, C, H, W]
+      coords: list of coords length N_total_crops
+      channel_ids: Tensor[N_total_crops, C]
+      datasets: list length N_total_crops
+      img_paths: list length N_total_crops
+    """
+    all_crops = []
+    all_coords = []
+    all_channel_ids = []
+    all_datasets = []
+    all_img_paths = []
+
+    for crops, coords, channel_ids, dataset, img_paths in batch:
+        # crops is tensor (n_crops, C, H, W)
+        n = crops.shape[0]
+        all_crops.append(crops)
+
+        # coords might be numpy array -> convert to list of tuples
+        if isinstance(coords, np.ndarray):
+            coords_list = [tuple(c) for c in coords.tolist()]
+        else:
+            coords_list = list(coords)
+        all_coords.extend(coords_list)
+
+        # repeat channel_ids per crop (channel_ids is 1D tensor of len C)
+        all_channel_ids.extend([channel_ids] * n)
+
+        # dataset and img_paths are lists of length n
+        all_datasets.extend(list(dataset))
+        all_img_paths.extend(list(img_paths))
+
+    # concat crops along crop-dim
+    crops = torch.cat(all_crops, dim=0)  # shape (N_total, C, H, W)
+
+    # stack channel ids into shape (N_total, C)
+    channel_ids = torch.stack(all_channel_ids, dim=0)  # (N_total, C)
+
+    return crops[:10], all_coords[:10], channel_ids[:10], all_datasets[:10], all_img_paths[:10]
 
 
 if __name__ == "__main__":
@@ -289,13 +362,7 @@ if __name__ == "__main__":
     MELTED_TABLE_PATH = '/home/kacper/Documents/oświata/UW/2nd_yr/magisterka/Immuvis/melted_table/results/melted_table.csv'
     melted_table = pd.read_csv(MELTED_TABLE_PATH)
 
-    train_transform = Compose(
-        [
-            RandomRotation(180, interpolation=InterpolationMode.BILINEAR),
-            RandomCrop(SIZE),
-            RandomHorizontalFlip(),
-        ]
-    )
+    train_transform = GridCrop(SIZE[0])
 
     test_transform = GridCrop(SIZE[0])
 
@@ -303,10 +370,11 @@ if __name__ == "__main__":
     for subset, cli_feat_for_subset in dataset_subsets: #dict
 
         # make datasetform tiff take the subset
-        classes = melted_table[melted_table["dataset"]==(subset)]
-        classes = classes[classes["value"]==cli_feat_for_subset]
-        classes = np.unique(classes["feature"])
-
+        classes = melted_table[melted_table["dataset"]==subset]
+        classes = classes[classes["feature"]==cli_feat_for_subset]
+        classes = np.unique(classes["value"])
+        
+        print(f"subset and feature: {subset, cli_feat_for_subset}")
         train_dataset = DatasetFromTIFF(
             panels_config=PANEL_CONFIG,
             split="train",
@@ -318,7 +386,7 @@ if __name__ == "__main__":
             use_butterworth_filter=True,
             use_minmax_normalization=False,
             use_clip_normalization=True,
-            file_extension="npy",
+            file_extension="tiff",
         )
 
         test_dataset = DatasetFromTIFF(
@@ -332,12 +400,12 @@ if __name__ == "__main__":
             use_butterworth_filter=True,
             use_minmax_normalization=False,
             use_clip_normalization=True,
-            file_extension="npy",
+            file_extension="tiff",
         )
-
+        print(f"train_dataset len: {len(train_dataset)}")
         train_batch_sampler = PanelBatchSampler(train_dataset, BATCH_SIZE)
         test_batch_sampler = PanelBatchSampler(test_dataset, BATCH_SIZE, shuffle=False)
-
+        print(f"train_batch_sampler len: {len(train_batch_sampler)}")
         train_dataloader = DataLoader(
             train_dataset,
             batch_sampler=train_batch_sampler,
@@ -345,7 +413,9 @@ if __name__ == "__main__":
             pin_memory=True,
             persistent_workers=True,
             prefetch_factor=4,
+            collate_fn=custom_collate,
         )
+        print(f"train_dataloader len: {len(train_dataloader)}")
         test_dataloader = DataLoader(
             test_dataset,
             batch_sampler=test_batch_sampler,
@@ -353,6 +423,7 @@ if __name__ == "__main__":
             pin_memory=True,
             persistent_workers=True,
             prefetch_factor=4,
+            collate_fn=custom_collate,
         )
 
         # Build model configuration
@@ -371,18 +442,16 @@ if __name__ == "__main__":
             print(f"Loading encoder weights from: {config.from_checkpoint}")
             checkpoint = torch.load(config.from_checkpoint, map_location=device)
             encoder_state_dict = checkpoint.get("model_state_dict", checkpoint)
-            # Filter to only encoder weights
-            encoder_keys = {k: v for k, v in encoder_state_dict.items() if "encoder." in k}
-            if encoder_keys:
+            
+            # Filter to only encoder weights and strip "encoder." prefix
+            encoder_keys = {k[8:]: v for k, v in encoder_state_dict.items() if "encoder." in k}
+            
+            # Try loading full state dict (assumes it's just the encoder)
+            try:
                 model.encoder.load_state_dict(encoder_keys)
-                print(f"Loaded {len(encoder_keys)} encoder parameters")
-            else:
-                # Try loading full state dict (assumes it's just the encoder)
-                try:
-                    model.encoder.load_state_dict(encoder_state_dict)
-                    print(f"Loaded encoder state dict")
-                except Exception as e:
-                    print(f"Warning: Could not load encoder: {e}")
+                print(f"Loaded encoder state dict")
+            except Exception as e:
+                print(f"Warning: Could not load encoder: {e}")
 
 
         # Setup optimizer and scheduler
@@ -410,13 +479,13 @@ if __name__ == "__main__":
 
         # Load checkpoint if specified
         start_epoch = 0
-        if config.resolve_checkpoint():
-            print(f"Loading model from checkpoint: {config.from_checkpoint}")
-            checkpoint = torch.load(config.from_checkpoint, map_location=device)
-            model.load_state_dict(checkpoint["model_state_dict"])
-            optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
-            scheduler.load_state_dict(checkpoint["scheduler_state_dict"])
-            start_epoch = checkpoint["epoch"] + 1
+        # if config.resolve_checkpoint():
+        #     print(f"Loading model from checkpoint: {config.from_checkpoint}")
+        #     checkpoint = torch.load(config.from_checkpoint, map_location=device)
+        #     #model.load_state_dict(checkpoint["model_state_dict"])
+        #     optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
+        #     scheduler.load_state_dict(checkpoint["scheduler_state_dict"])
+        #     start_epoch = checkpoint["epoch"] + 1
 
         # Train the model
         train_masked(

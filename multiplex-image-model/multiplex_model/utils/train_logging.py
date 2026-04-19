@@ -374,7 +374,7 @@ def log_finetuning_validation_metrics(
     val_loss: float,
     val_preds: np.array,
     val_y: np.array,
-    classes: np.array,
+    label_encoder,
     epoch: int,
 ) -> None:
     """Log validation metrics to Comet.ml.
@@ -389,7 +389,7 @@ def log_finetuning_validation_metrics(
         return
 
     num_classes = len(classes)
-    mapping = {c.item(): i for i, c in enumerate(classes)}
+
     confusion_matrix = np.zeros((num_classes, num_classes), dtype=int)
     for truth, pred in zip(val_y, val_preds):
         confusion_matrix[mapping(truth), mapping(pred)] += 1
