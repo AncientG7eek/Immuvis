@@ -172,6 +172,7 @@ def train_masked(
             melted_table=melted_table,
             cli_feat_for_subset=cli_feat_for_subset,
             classes=classes,
+            label_encoder=label_encoder,
             step=step,
         )
 
@@ -205,6 +206,7 @@ def test_masked(
     melted_table,
     cli_feat_for_subset,
     classes,
+    label_encoder,
     step,
     num_plots=4,
     spatial_masking_ratio=0.6,
@@ -230,27 +232,49 @@ def test_masked(
                 img, channel_ids, panel_idx, img_path = batch_data
             
             img = img.to(device, dtype=torch.float32)
+            print(f"num crops: {len(img)}", flush=True)
             channel_ids = channel_ids.to(device, dtype=torch.long)
+            print(f"img shape: {img.shape}")
             
-            # Handle batch of crops: reshape (batch_size, num_crops, C, H, W) -> (batch_size * num_crops, C, H, W)
+            # Handle both GridCrop (with coords) and regular transforms
             if img.dim() == 5:  # (batch, num_crops, C, H, W)
                 batch_size, num_crops = img.shape[0], img.shape[1]
                 img = img.view(batch_size * num_crops, *img.shape[2:])
                 # Repeat channel_ids and img_path for each crop
                 if isinstance(channel_ids, torch.Tensor) and channel_ids.dim() == 1:
                     channel_ids = channel_ids.unsqueeze(0).repeat(batch_size * num_crops, 1).squeeze()
-                img_path = [p for p in img_path for _ in range(num_crops)] if isinstance(img_path, list) else img_path
-
-            # Get clinical features from melted table
-            all_cli_features = get_a_subset(melted_table, "img_path", img_path)
+                img_path = [p.split("/")[-1].split('.')[0] for p in img_path for _ in range(num_crops)] if isinstance(img_path, list) else img_path.split("/")[-1].split('.')[0]
+            else:
+                img_path = [p.split("/")[-1].split('.')[0] for p in img_path]
+                
+            print(img_path)
+            # here use img_path to get clinical 
+            all_cli_features = get_a_subset(melted_table, "img_name", img_path)
+            print(f"all cli feat: {all_cli_features}")
+            
             selected_cli_feat = get_a_subset(all_cli_features, "feature", cli_feat_for_subset)
-            y = torch.tensor(selected_cli_feat["value"].values, device=device, dtype=torch.long)
+            print(f"selected cli feat: {selected_cli_feat}")
+            print("Encoding labels")
+            label_per_crop = []
+            for img_p in img_path:
+                per_crop = selected_cli_feat[selected_cli_feat["img_name"].astype(str)==img_p]
+                print(f"per crop: {per_crop}")
+                label_per_crop.append(per_crop)
+            label_per_crop = pd.concat(label_per_crop)
+            print(f"label per crop: {label_per_crop}")
+            print(f"labels to encode: {label_per_crop["value"]}")
+            y = torch.tensor(label_encoder.encode(label_per_crop["value"].values), device=device, dtype=torch.long)
+            print(f"encoded labels: {y}")
+            loss_fn = torch.nn.CrossEntropyLoss()
 
-            # Forward pass (no autocast needed in eval mode with no_grad)
+            
+            print("Calculating logits")
             logits = model(x=img, encoded_indices=channel_ids)
+            print("Calculating loss")
             loss = loss_fn(logits, y)
+            print("Calculating preds")
 
-            preds = torch.argmax(logits, dim=1)
+            preds = torch.argmax(logits.detach(), dim=1)
             all_preds.append(preds.cpu())
             all_y.append(y.cpu())
 
@@ -272,13 +296,13 @@ def test_masked(
     all_y = torch.cat(all_y).cpu().numpy()
 
     val_metrics = log_finetuning_validation_metrics(
-        loss=val_loss,
-        preds=all_preds,
-        y=all_y,
-        label_encoder=LabelEncoder,
-        step=step,
+        val_loss=val_loss,
+        val_preds=all_preds,
+        val_y=all_y,
+        label_encoder=label_encoder,
+        epoch=epoch,
     )
-
+        
     print(f"{'=' * 40} EPOCH {epoch + 1} {'=' * 40}")
     print(f"NLL: {val_loss:.4f}")
     if "val/macroF1" in val_metrics:

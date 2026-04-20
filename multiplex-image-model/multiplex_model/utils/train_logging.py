@@ -388,20 +388,20 @@ def log_finetuning_validation_metrics(
     if _experiment is None:
         return
 
-    num_classes = len(classes)
+    num_classes = len(label_encoder.get_dict())
 
     confusion_matrix = np.zeros((num_classes, num_classes), dtype=int)
     for truth, pred in zip(val_y, val_preds):
-        confusion_matrix[mapping(truth), mapping(pred)] += 1
+        confusion_matrix[truth, pred] += 1
 
     TP = np.diag(confusion_matrix)
     FP = confusion_matrix.sum(axis=0) - TP
     FN = confusion_matrix.sum(axis=1) - TP
     
-    precision = TP / (TP+FP)
-    recall = TP / (TP+FN)
+    precision = TP / (TP+FP+1e-10)
+    recall = TP / (TP+FN+1e-10)
 
-    F1score = 2*precision*recall / (precision+recall)
+    F1score = 2*precision*recall / (precision+recall+1e-10)
     val_macroF1 = np.mean(F1score)
 
 
