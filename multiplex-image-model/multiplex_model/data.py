@@ -18,6 +18,7 @@ class DatasetFromTIFF(Dataset):
         panels_config: dict,
         split: str,
         marker_tokenizer: dict[str, int],
+        run_on_hpc: bool = True,
         subset=None,
         transform=None,
         use_preprocessing: bool = True,
@@ -49,9 +50,9 @@ class DatasetFromTIFF(Dataset):
         assert "paths" in panels_config, (
             "Panels config must have 'paths' attribute with paths of splits of the data."
         )
-        assert split in panels_config["paths"], (
-            f"Panels config must have '{split}' attribute with data path."
-        )
+        # assert split in panels_config["paths"], (
+        #     f"Panels config must have '{split}' attribute with data path."
+        # )
         assert "datasets" in panels_config, (
             "Panels config must have 'datasets' attribute with subdirectories."
         )
@@ -69,8 +70,12 @@ class DatasetFromTIFF(Dataset):
             )
             for dataset in panels_config["datasets"]
         }
+        
+        if run_on_hpc:
+            img_path = panels_config["paths"]["server"][split]
+        else: 
+            img_path = panels_config["paths"]["local"][split]
 
-        img_path = panels_config["paths"][split]
         self.imgs = []  # tuples of (img_path, dataset)
         for dataset in panels_config["datasets"]:
             if subset:
@@ -78,7 +83,7 @@ class DatasetFromTIFF(Dataset):
                 if dataset == subset:
                     print(f"dataset: {dataset}")
                     tiffs = glob(os.path.join(img_path, dataset, "imgs", f"*.{file_extension}"))
-                    tiffs =tiffs[:2]
+                    
                     self.imgs.extend([(tiff, dataset) for tiff in tiffs])
         print(f"num imgs: {len(self.imgs)}")
         if use_global_clip_limits:

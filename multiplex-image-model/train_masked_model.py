@@ -65,9 +65,9 @@ def train_masked(
     model.train()
     scaler = GradScaler()
     run_name = get_run_name()
-    print(f"classes: {classes}")
+    # print(f"classes: {classes}")
     label_encoder = LabelEncoder(classes)
-    print(f"label dict: {label_encoder.get_dict()}")
+    # print(f"label dict: {label_encoder.get_dict()}")
 
     if not os.path.exists(checkpoints_path):
         os.makedirs(checkpoints_path, exist_ok=True)
@@ -105,22 +105,28 @@ def train_masked(
             else:
                 img_path = [p.split("/")[-1].split('.')[0] for p in img_path]
                 
-            print(img_path)
+            
             # here use img_path to get clinical 
             all_cli_features = get_a_subset(melted_table, "img_name", img_path)
-            print(f"all cli feat: {all_cli_features}")
+            # print(f"all cli feat: {all_cli_features}")
             
             selected_cli_feat = get_a_subset(all_cli_features, "feature", cli_feat_for_subset)
-            print(f"selected cli feat: {selected_cli_feat}")
+            selected_cli_feat = selected_cli_feat.dropna()
+            # print(f"selected cli feat: {selected_cli_feat}")
             print("Encoding labels")
             label_per_crop = []
             for img_p in img_path:
                 per_crop = selected_cli_feat[selected_cli_feat["img_name"].astype(str)==img_p]
-                print(f"per crop: {per_crop}")
+                # print(f"per crop: {per_crop}")
                 label_per_crop.append(per_crop)
             label_per_crop = pd.concat(label_per_crop)
-            print(f"label per crop: {label_per_crop}")
-            print(f"labels to encode: {label_per_crop["value"]}")
+            if len(label_per_crop) != len(img):
+                print(f"imgs: {img}\n labels: {label_per_crop}")
+                img_lacking_cli = set(img_path) - set(all_cli_features["img_name"])
+                print(f"Skipping batch - no clinical data for images: {img_lacking_cli}")
+                continue
+            # print(f"label per crop: {label_per_crop}")
+            # print(f"labels to encode: {label_per_crop["value"]}")
             y = torch.tensor(label_encoder.encode(label_per_crop["value"].values), device=device, dtype=torch.long)
             print(f"encoded labels: {y}")
             loss_fn = torch.nn.CrossEntropyLoss()
@@ -134,7 +140,7 @@ def train_masked(
 
             preds = torch.argmax(logits.detach(), dim=1)
             all_preds.append(preds.cpu())
-            all_y.append(y.cpu())
+            all_y.append(y.detach().cpu())
 
             scaler.scale(loss / gradient_accumulation_steps).backward()
 
@@ -247,24 +253,30 @@ def test_masked(
             else:
                 img_path = [p.split("/")[-1].split('.')[0] for p in img_path]
                 
-            print(img_path)
+            #print(img_path)
             # here use img_path to get clinical 
             all_cli_features = get_a_subset(melted_table, "img_name", img_path)
             print(f"all cli feat: {all_cli_features}")
             
             selected_cli_feat = get_a_subset(all_cli_features, "feature", cli_feat_for_subset)
-            print(f"selected cli feat: {selected_cli_feat}")
+            selected_cli_feat = selected_cli_feat.dropna()
+            #print(f"selected cli feat: {selected_cli_feat}")
             print("Encoding labels")
             label_per_crop = []
             for img_p in img_path:
                 per_crop = selected_cli_feat[selected_cli_feat["img_name"].astype(str)==img_p]
-                print(f"per crop: {per_crop}")
+            #    print(f"per crop: {per_crop}")
                 label_per_crop.append(per_crop)
             label_per_crop = pd.concat(label_per_crop)
-            print(f"label per crop: {label_per_crop}")
-            print(f"labels to encode: {label_per_crop["value"]}")
+            if len(label_per_crop) != len(img):
+                print(f"imgs: {img}\n labels: {label_per_crop}")
+                img_lacking_cli = set(img_path) - set(all_cli_features["img_name"])
+                print(f"Skipping batch - no clinical data for images: {img_lacking_cli}")
+                continue
+            #print(f"label per crop: {label_per_crop}")
+            #print(f"labels to encode: {label_per_crop["value"]}")
             y = torch.tensor(label_encoder.encode(label_per_crop["value"].values), device=device, dtype=torch.long)
-            print(f"encoded labels: {y}")
+            #print(f"encoded labels: {y}")
             loss_fn = torch.nn.CrossEntropyLoss()
 
             
@@ -276,7 +288,7 @@ def test_masked(
 
             preds = torch.argmax(logits.detach(), dim=1)
             all_preds.append(preds.cpu())
-            all_y.append(y.cpu())
+            all_y.append(y.detach().cpu())
 
             running_loss += loss.item()
             #     )
@@ -289,6 +301,8 @@ def test_masked(
             #         img_idx=idx,
             #     )
             #     plt.close("all")
+            # del img, coords, channel_ids, panel_idx, img_path, batch_data, logits, loss, preds
+            # torch.cuda.empty_cache()
 
     val_loss = running_loss / len(test_dataloader)
 
@@ -359,7 +373,7 @@ def custom_collate(batch):
     # stack channel ids into shape (N_total, C)
     channel_ids = torch.stack(all_channel_ids, dim=0)  # (N_total, C)
 
-    return crops[:10], all_coords[:10], channel_ids[:10], all_datasets[:10], all_img_paths[:10]
+    return crops, all_coords, channel_ids, all_datasets, all_img_paths
 
 
 if __name__ == "__main__":
@@ -383,7 +397,7 @@ if __name__ == "__main__":
     TOKENIZER = YAML().load(open(config.tokenizer_config))
     INV_TOKENIZER = {v: k for k, v in TOKENIZER.items()}
 
-    MELTED_TABLE_PATH = '/home/kacper/Documents/oświata/UW/2nd_yr/magisterka/Immuvis/melted_table/results/melted_table.csv'
+    MELTED_TABLE_PATH = '../melted_table/results/melted_table.csv'
     melted_table = pd.read_csv(MELTED_TABLE_PATH)
 
     train_transform = GridCrop(SIZE[0])
@@ -396,6 +410,7 @@ if __name__ == "__main__":
         # make datasetform tiff take the subset
         classes = melted_table[melted_table["dataset"]==subset]
         classes = classes[classes["feature"]==cli_feat_for_subset]
+        classes = classes.dropna()
         classes = np.unique(classes["value"])
         
         print(f"subset and feature: {subset, cli_feat_for_subset}")
@@ -434,7 +449,7 @@ if __name__ == "__main__":
             train_dataset,
             batch_sampler=train_batch_sampler,
             num_workers=NUM_WORKERS,
-            pin_memory=True,
+            pin_memory=False,
             persistent_workers=True,
             prefetch_factor=4,
             collate_fn=custom_collate,
@@ -444,7 +459,7 @@ if __name__ == "__main__":
             test_dataset,
             batch_sampler=test_batch_sampler,
             num_workers=NUM_WORKERS,
-            pin_memory=True,
+            pin_memory=False,
             persistent_workers=True,
             prefetch_factor=4,
             collate_fn=custom_collate,
