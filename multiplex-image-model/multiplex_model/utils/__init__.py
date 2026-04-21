@@ -2,6 +2,7 @@
 
 # Configuration
 from .configuration import (
+    ABMILHeadConfig,
     DecoderConfig,
     EncoderConfig,
     FinetuningConfig,

@@ -1,7 +1,7 @@
 """Configuration models and utilities using Pydantic for validation."""
 
 import os
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
@@ -304,6 +304,20 @@ class TrainingConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")  # Raise error on unknown fields
 
 
+class ABMILHeadConfig(BaseModel):
+    """ABMIL-specific parameters — only parsed when head_type: abmil."""
+
+    hidden_dim: int = Field(128, gt=0, description="Attention network hidden width")
+    gated: bool = Field(True, description="Gated attention (recommended)")
+    dropout: float = Field(0.0, ge=0.0, lt=1.0, description="Instance-level dropout")
+    classifier_hidden_dims: list[int] = Field(
+        default_factory=list,
+        description="MLP layers between bag embedding and logits; [] = single linear",
+    )
+
+    model_config = ConfigDict(extra="forbid")
+
+
 class FinetuningConfig(BaseModel):
     """Configuration for fine-tuning on clinical classification tasks.
 
@@ -339,8 +353,17 @@ class FinetuningConfig(BaseModel):
     epochs: int = Field(..., gt=0)
 
     # Model architecture
+    head_type: Literal["logistic", "abmil"] = Field(
+        "logistic",
+        description="'logistic' = CropClassifierHead (mean-pool + MLP); 'abmil' = ABMILHead",
+    )
     encoder_config: EncoderConfig = Field(..., alias="encoder")
     classifier_config: ClassifierConfig = Field(..., alias="classifier")
+    abmil_config: ABMILHeadConfig = Field(
+        default_factory=ABMILHeadConfig,
+        alias="abmil",
+        description="ABMIL head parameters — only used when head_type: abmil",
+    )
 
     # Checkpoint
     from_checkpoint: str | None = Field(None)

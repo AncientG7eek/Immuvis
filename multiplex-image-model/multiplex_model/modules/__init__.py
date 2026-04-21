@@ -96,6 +96,9 @@ from .immuvis import (
     Finetuning,  # deprecated alias
 )
 
+# Downstream heads
+from .abmil import ABMILHead
+
 
 __all__ = [
     # Registry system
@@ -132,4 +135,6 @@ __all__ = [
     "CropClassifierHead",
     "FinetuningModel",
     "Finetuning",
+    # Downstream heads
+    "ABMILHead",
 ]

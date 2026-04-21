@@ -13,6 +13,7 @@ from tqdm import tqdm
 
 from multiplex_model.clinical import LabelEncoder, get_a_subset
 from multiplex_model.data import DatasetFromTIFF, PanelBatchSampler, GridCrop
+from multiplex_model.modules.abmil import ABMILHead
 from multiplex_model.modules.immuvis import CropClassifierHead, FinetuningModel
 from multiplex_model.utils import (
     finish_experiment,
@@ -330,12 +331,27 @@ if __name__ == "__main__":
 
         num_channels = len(TOKENIZER)
         num_classes = len(classes)
+        input_dim = config.encoder_config.pm_embedding_dims[-1]
 
-        head = CropClassifierHead(
-            input_dim=config.encoder_config.pm_embedding_dims[-1],
-            hidden_dims=config.classifier_config.hidden_dims,
-            num_classes=num_classes,
-        )
+        if config.head_type == "abmil":
+            abmil = config.abmil_config
+            head = ABMILHead(
+                input_dim=input_dim,
+                num_classes=num_classes,
+                hidden_dim=abmil.hidden_dim,
+                gated=abmil.gated,
+                dropout=abmil.dropout,
+                classifier_hidden_dims=abmil.classifier_hidden_dims,
+            )
+            print(f"Head: ABMILHead (gated={abmil.gated}, hidden_dim={abmil.hidden_dim})")
+        else:
+            head = CropClassifierHead(
+                input_dim=input_dim,
+                hidden_dims=config.classifier_config.hidden_dims,
+                num_classes=num_classes,
+            )
+            print(f"Head: CropClassifierHead (hidden_dims={config.classifier_config.hidden_dims})")
+
         model = FinetuningModel(
             num_channels=num_channels,
             encoder_config=config.encoder_config.model_dump(),

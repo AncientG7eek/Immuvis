@@ -15,6 +15,16 @@ encoder:
 classifier:
   hidden_dims: [512, 128]
 
+# Head selection: "logistic" (mean-pool + MLP) or "abmil" (attention MIL)
+head_type: logistic
+
+# ABMIL parameters — only used when head_type: abmil
+abmil:
+  hidden_dim: 128
+  gated: true
+  dropout: 0.0
+  classifier_hidden_dims: []
+
 # Data configuration
 dataset_subsets: [['danenberg', 'Grade']]
 panel_config: configs/all_panels_config.yaml
