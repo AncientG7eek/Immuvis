@@ -30,6 +30,7 @@ dataset_subsets: [['danenberg','Grade']]
 panel_config: configs/all_panels_config.yaml
 tokenizer_config: configs/all_markers_tokenizer.yaml
 input_image_size: [64, 64]
+max_crops_per_image: 64
 num_workers: 8
 batch_size: 1
 

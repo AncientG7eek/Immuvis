@@ -400,9 +400,9 @@ if __name__ == "__main__":
     MELTED_TABLE_PATH = '../melted_table/results/melted_table.csv'
     melted_table = pd.read_csv(MELTED_TABLE_PATH)
 
-    train_transform = GridCrop(SIZE[0])
+    train_transform = GridCrop(SIZE[0], max_crops=config.max_crops_per_image)
 
-    test_transform = GridCrop(SIZE[0])
+    test_transform = GridCrop(SIZE[0], max_crops=config.max_crops_per_image)
 
     dataset_subsets = config.dataset_subsets
     for subset, cli_feat_for_subset in dataset_subsets: #dict

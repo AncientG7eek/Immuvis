@@ -261,8 +261,9 @@ class TestCrop:
         return img, (top,left)
 
 class GridCrop:
-    def __init__(self, crop_size: int):
+    def __init__(self, crop_size: int, max_crops: int = 64):
         self.crop_size = crop_size
+        self.max_crops = max_crops
 
     def __call__(self, img: torch.Tensor) -> List[torch.Tensor]:
         h, w = img.shape[-2], img.shape[-1]
@@ -275,8 +276,15 @@ class GridCrop:
             for j in range(num_cols):
                 top = i * self.crop_size
                 left = j * self.crop_size
-                img = crop(img, top, left, self.crop_size, self.crop_size)
-                crops.append(img.numpy())
-                coordinates.append(((int(top),int(top)+self.crop_size),(int(left),int(left)+self.crop_size)))
+                c = crop(img, top, left, self.crop_size, self.crop_size)
+                crops.append(c.numpy())
+                coordinates.append(((int(top), int(top) + self.crop_size),
+                                    (int(left), int(left) + self.crop_size)))
+        
+        if len(crops) > self.max_crops:
+            idx = np.random.choice(len(crops), self.max_crops, replace=False)
+            idx.sort()
+            crops = [crops[i] for i in idx]
+            coordinates = [coordinates[i] for i in idx]
         
         return crops, np.array(coordinates)
