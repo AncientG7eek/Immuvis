@@ -4,6 +4,7 @@
 from .configuration import (
     DecoderConfig,
     EncoderConfig,
+    FinetuningConfig,
     HyperkernelConfig,
     ModuleConfig,
     TrainingConfig,
@@ -39,6 +40,7 @@ __all__ = [
     "EncoderConfig",
     "DecoderConfig",
     "TrainingConfig",
+    "FinetuningConfig",
     # Masking
     "apply_channel_masking",
     "apply_spatial_masking",

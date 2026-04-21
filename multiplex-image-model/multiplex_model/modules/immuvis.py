@@ -1,3 +1,4 @@
+from abc import ABC, abstractmethod
 from typing import Literal
 
 import torch
@@ -272,27 +273,51 @@ class Classifier(nn.Module):
         hidden_dims: list,
         num_classes: int,
     ) -> None:
-        """
-        Args:
-            input_embedding_dim (int): Embedding dimension of the input tensor.
-
-        """
-
         super().__init__()
-        hidden_dims = [input_dim] + hidden_dims + [num_classes]
+        dims = [input_dim] + hidden_dims + [num_classes]
         self.mlp = nn.Sequential(
-
-            *[
-                nn.Linear(hidden_dims[i], hidden_dims[i+1])
-                for i in range(len(hidden_dims)-1)
-            ]
+            *[nn.Linear(dims[i], dims[i + 1]) for i in range(len(dims) - 1)]
         )
-        self.logsoftmax = nn.LogSoftmax(dim=1)
 
     def forward(self, x):
-        x = self.mlp(x)
-        logits = self.logsoftmax(x)
-        return logits
+        return self.mlp(x)  # raw logits; pair with CrossEntropyLoss, not NLLLoss
+
+
+class TaskHead(nn.Module, ABC):
+    """Interface for downstream classification heads.
+
+    Receives per-instance (crop-level) embeddings (N_instances, E)
+    and returns logits (1, num_classes). Swap this module to change
+    the aggregation strategy (e.g. mean-pool → ABMIL attention pool)
+    without touching the backbone or training loop.
+    """
+
+    @abstractmethod
+    def forward(self, instance_embeddings: torch.Tensor) -> torch.Tensor:
+        """
+        Args:
+            instance_embeddings: (N_instances, E) per-crop embeddings for one bag
+        Returns:
+            logits: (1, num_classes) raw class scores
+        """
+
+
+class CropClassifierHead(TaskHead):
+    """Mean-pool crops → MLP → logits. Current fine-tuning baseline.
+
+    Replace with ABMILHead (or any other TaskHead) for attention MIL.
+    """
+
+    def __init__(self, input_dim: int, hidden_dims: list[int], num_classes: int):
+        super().__init__()
+        dims = [input_dim] + hidden_dims + [num_classes]
+        self.mlp = nn.Sequential(
+            *[nn.Linear(dims[i], dims[i + 1]) for i in range(len(dims) - 1)]
+        )
+
+    def forward(self, instance_embeddings: torch.Tensor) -> torch.Tensor:
+        pooled = instance_embeddings.mean(dim=0)    # (N, E) → (E,)
+        return self.mlp(pooled).unsqueeze(0)        # (1, num_classes)
 
 
 class MultiplexImageDecoder(nn.Module):
@@ -493,7 +518,67 @@ class MultiplexAutoencoder(nn.Module):
             outputs["features"] = encoding_output["features"]
         return outputs
 
+class FinetuningModel(nn.Module):
+    """Backbone encoder + swappable TaskHead for downstream classification.
+
+    The encoder is kept in `model.encoder` so pretraining checkpoints load
+    cleanly. The head is isolated in `model.head`; replacing it (e.g. for
+    ABMIL) requires only:
+        model.head = ABMILHead(input_dim=model.latent_dim, ...)
+
+    Forward contract:
+        x            : (N_crops, C, H, W)   — all crops of ONE image
+        channel_ids  : (C,) or (N_crops, C) — shared marker indices
+        returns      : (1, num_classes)      — one prediction per bag
+    """
+
+    def __init__(
+        self,
+        num_channels: int,
+        encoder_config: dict,
+        head: TaskHead,
+    ):
+        super().__init__()
+        self.latent_dim = encoder_config["pm_embedding_dims"][-1]
+        self.encoder = MultiplexImageEncoder(num_channels=num_channels, **encoder_config)
+        self.head = head
+
+    def encode_crops(
+        self,
+        x: torch.Tensor,
+        channel_ids: torch.Tensor,
+    ) -> torch.Tensor:
+        """Encode N crops → (N, E) instance embeddings (spatial GAP applied).
+
+        Args:
+            x: (N_crops, C, H, W)
+            channel_ids: (C,) shared across crops, or (N_crops, C)
+        """
+        N = x.shape[0]
+        if channel_ids.dim() == 1:
+            channel_ids = channel_ids.unsqueeze(0).expand(N, -1)
+        out = self.encoder(x, channel_ids)["output"]  # (N, E, H', W')
+        if out.dim() > 2:
+            out = out.mean(dim=[2, 3])                # spatial GAP → (N, E)
+        return out
+
+    def forward(
+        self,
+        x: torch.Tensor,
+        channel_ids: torch.Tensor,
+    ) -> torch.Tensor:
+        instance_emb = self.encode_crops(x, channel_ids)  # (N_crops, E)
+        return self.head(instance_emb)                     # (1, num_classes)
+
+
+# ---------------------------------------------------------------------------
+# Legacy alias — kept for backward compatibility with old checkpoints/scripts.
+# New code should use FinetuningModel + CropClassifierHead directly.
+# ---------------------------------------------------------------------------
+
 class Finetuning(nn.Module):
+    """Deprecated. Use FinetuningModel + CropClassifierHead instead."""
+
     def __init__(
         self,
         num_channels: int,
@@ -501,63 +586,20 @@ class Finetuning(nn.Module):
         encoder_config: dict,
         classifier_config: dict,
     ):
-        """Initialize the Multiplex Autoencoder model.
-
-        Args:
-            num_channels (int): Number of all possible channels/markers.
-            encoder_config (dict): Configuration for the encoder.
-            decoder_config (dict): Configuration for the decoder.
-        """
         super().__init__()
         self.latent_dim = encoder_config["pm_embedding_dims"][-1]
-        self.num_channels = num_channels
-
-        self.input_dim = self.latent_dim
-        self.hidden_dims = classifier_config["hidden_dims"]
-        self.num_classes = num_classes
-
-        self.encoder = MultiplexImageEncoder(
-            num_channels=self.num_channels, **encoder_config
-        )
-
+        self.encoder = MultiplexImageEncoder(num_channels=num_channels, **encoder_config)
         self.classifier = Classifier(
-            input_dim = self.input_dim,
-            hidden_dims= self.hidden_dims,
-            num_classes= self.num_classes,
+            input_dim=self.latent_dim,
+            hidden_dims=classifier_config["hidden_dims"],
+            num_classes=num_classes,
         )
-     
 
-    def encode(
-        self,
-        x: torch.Tensor,
-        encoded_indices: torch.Tensor,
-        return_features: bool = False,
-    ) -> dict:
-        """Encode the input images using the encoder.
-
-        Args:
-            x (torch.Tensor): Input images tensor with shape (B, C, H, W).
-            encoded_indices (torch.Tensor): Indices of the markers in channels.
-            return_features (bool, optional): If True, returns the features after encoding. Defaults to False.
-
-        Returns:
-            dict: A dictionary containing the encoded images tensor (under 'output') and optionally the features.
-        """
-        encoding_output = self.encoder(
-            x, encoded_indices, return_features=return_features
-        )
-        outputs = {"output": encoding_output["output"]}
-
-        if return_features:
-            outputs["features"] = encoding_output["features"]
-        return outputs
-    
     def forward(self, x, encoded_indices):
-        emb = self.encode(x, encoded_indices)
-        # Extract the embedding tensor from dict and flatten spatial dimensions if needed
-        output_tensor = emb["output"]
-        # Flatten spatial dimensions if present (e.g., shape: (B, D, H, W) -> (B, D*H*W))
-        if output_tensor.dim() > 2:
-            output_tensor = output_tensor.mean(dim=[2,3])
-        pred = self.classifier(output_tensor)
-        return pred
+        N = x.shape[0]
+        if encoded_indices.dim() == 1:
+            encoded_indices = encoded_indices.unsqueeze(0).expand(N, -1)
+        out = self.encoder(x, encoded_indices)["output"]
+        if out.dim() > 2:
+            out = out.mean(dim=[2, 3])
+        return self.classifier(out)

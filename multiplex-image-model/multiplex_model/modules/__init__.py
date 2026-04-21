@@ -90,7 +90,10 @@ from .immuvis import (
     MultiplexAutoencoder,
     MultiplexImageDecoder,
     MultiplexImageEncoder,
-    Finetuning
+    TaskHead,
+    CropClassifierHead,
+    FinetuningModel,
+    Finetuning,  # deprecated alias
 )
 
 
@@ -125,4 +128,8 @@ __all__ = [
     "MultiplexImageEncoder",
     "MultiplexImageDecoder",
     "MultiplexAutoencoder",
+    "TaskHead",
+    "CropClassifierHead",
+    "FinetuningModel",
+    "Finetuning",
 ]

@@ -302,3 +302,75 @@ class TrainingConfig(BaseModel):
         return True
 
     model_config = ConfigDict(extra="forbid")  # Raise error on unknown fields
+
+
+class FinetuningConfig(BaseModel):
+    """Configuration for fine-tuning on clinical classification tasks.
+
+    Separate from TrainingConfig so masking / pretraining fields are not
+    required. Add new downstream-task fields here without touching the
+    pretraining pipeline.
+    """
+
+    # Device / data
+    device: str = Field(..., description="Device to use (e.g. 'cuda', 'cpu')")
+    input_image_size: tuple[int, int] = Field(..., description="Crop size (H, W)")
+    batch_size: int = Field(..., gt=0, description="Images per DataLoader batch")
+    num_workers: int = Field(..., ge=0, description="DataLoader worker count")
+    max_crops_per_image: int = Field(
+        64, gt=0, description="Max GridCrop patches per image (OOM guard)"
+    )
+
+    # Config file paths
+    panel_config: str = Field(..., description="Path to panel YAML")
+    tokenizer_config: str = Field(..., description="Path to tokenizer YAML")
+
+    # Dataset
+    dataset_subsets: list[list] = Field(
+        ..., description="[['dataset_name', 'clinical_feature'], ...]"
+    )
+
+    # Optimiser
+    peak_lr: float = Field(..., gt=0, alias="lr")
+    final_lr: float = Field(..., gt=0)
+    frac_warmup_steps: float = Field(..., ge=0, le=1)
+    weight_decay: float = Field(..., ge=0)
+    gradient_accumulation_steps: int = Field(..., gt=0)
+    epochs: int = Field(..., gt=0)
+
+    # Model architecture
+    encoder_config: EncoderConfig = Field(..., alias="encoder")
+    classifier_config: ClassifierConfig = Field(..., alias="classifier")
+
+    # Checkpoint
+    from_checkpoint: str | None = Field(None)
+    checkpoints_dir: str = Field("checkpoints")
+    save_checkpoint_freq: int = Field(..., gt=0)
+
+    # Comet.ml
+    comet_project: str = Field(...)
+    comet_workspace: str | None = Field(None)
+    comet_api_key: str | None = Field(None)
+    tags: list[str] = Field(default_factory=list)
+    run_name: str | None = Field(None)
+
+    def resolve_checkpoint(self) -> bool:
+        """Resolve 'last' sentinel or check path existence.
+
+        Returns True if a checkpoint should be loaded.
+        """
+        if not self.from_checkpoint:
+            return False
+        if self.from_checkpoint == "last":
+            if not self.run_name:
+                self.run_name = get_run_name()
+            last = f"{self.checkpoints_dir}/last_checkpoint-{self.run_name}.pth"
+            if os.path.exists(last):
+                self.from_checkpoint = last
+                return True
+            print(f"No last checkpoint at {last}, starting from scratch.")
+            self.from_checkpoint = None
+            return False
+        return True
+
+    model_config = ConfigDict(extra="forbid", populate_by_name=True)
