@@ -10,6 +10,7 @@ from ruamel.yaml import YAML
 from torch.amp import GradScaler, autocast
 from torch.utils.data import DataLoader
 from tqdm import tqdm
+from sklearn.utils.class_weight import compute_class_weight
 
 from multiplex_model.clinical import LabelEncoder, get_a_subset
 from multiplex_model.data import DatasetFromTIFF, PanelBatchSampler, GridCrop
@@ -23,6 +24,29 @@ from multiplex_model.utils import (
     log_finetuning_validation_metrics,
 )
 from multiplex_model.utils.configuration import FinetuningConfig
+
+
+def calc_class_imbalance(melted_table, subset, cli_feat_for_subset, classes, device):
+
+    # --- START: Add class weight calculation ---
+    # Get labels for the specific subset and feature
+    train_labels_df = melted_table[
+        (melted_table["dataset"] == subset) &
+        (melted_table["feature"] == cli_feat_for_subset)
+    ]
+    # Ensure we only use labels that are in the defined classes
+    train_labels_df = train_labels_df[train_labels_df['value'].isin(classes)]
+
+    # Calculate class weights
+    class_weights = compute_class_weight(
+        'balanced',
+        classes=np.array(classes, dtype=train_labels_df['value'].dtype),
+        y=train_labels_df['value'].values
+    )
+    class_weights_tensor = torch.tensor(class_weights, dtype=torch.float).to(device)
+
+    print(f"Using class weights: {class_weights_tensor}")
+    return class_weights_tensor
 
 
 def bag_collate(batch):
@@ -86,11 +110,12 @@ def train_masked(
     checkpoints_path="checkpoints",
 ):
     """Fine-tune model on clinical classification, one image (bag) per step."""
-    model.train()
+    
     scaler = GradScaler()
     run_name = get_run_name()
     label_encoder = LabelEncoder(classes)
-    loss_fn = torch.nn.CrossEntropyLoss()
+    class_weights = calc_class_imbalance(melted_table, subset, cli_feat_for_subset, classes, device)
+    loss_fn = torch.nn.CrossEntropyLoss(weight=class_weights)
 
     os.makedirs(checkpoints_path, exist_ok=True)
 

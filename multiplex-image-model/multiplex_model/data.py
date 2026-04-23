@@ -83,9 +83,9 @@ class DatasetFromTIFF(Dataset):
                 if dataset == subset:
                     print(f"dataset: {dataset}")
                     tiffs = glob(os.path.join(img_path, dataset, "imgs", f"*.{file_extension}"))
-                    
+                    #tiffs = tiffs[:10]
                     self.imgs.extend([(tiff, dataset) for tiff in tiffs])
-        print(f"num imgs: {len(self.imgs)}")
+        
         if use_global_clip_limits:
             self.clip_limits = {}
         else:
@@ -183,8 +183,7 @@ class DatasetFromTIFF(Dataset):
         dataset = [dataset] * len(crops)
         img_path = [img_path] * len(crops)
     #     return torch.tensor(img), channel_ids, dataset, img_path
-        for thing in [crops, coords, channel_ids, dataset, img_path]:
-            print(len(thing), flush=True)
+    
         if self.transform:
             return crops, coords, channel_ids, dataset, img_path
         return crops, channel_ids, dataset, img_path
@@ -282,6 +281,7 @@ class GridCrop:
                                     (int(left), int(left) + self.crop_size)))
         
         if len(crops) > self.max_crops:
+            print(f"Number of crops exceeded {self.max_crops}. Downsampling...")
             idx = np.random.choice(len(crops), self.max_crops, replace=False)
             idx.sort()
             crops = [crops[i] for i in idx]
