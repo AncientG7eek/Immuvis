@@ -345,7 +345,8 @@ class FinetuningConfig(BaseModel):
     )
 
     # Optimiser
-    peak_lr: float = Field(..., gt=0, alias="lr")
+    encoder_lr: float = Field(..., gt=0)
+    classifier_lr: float = Field(..., gt=0)
     final_lr: float = Field(..., gt=0)
     frac_warmup_steps: float = Field(..., ge=0, le=1)
     weight_decay: float = Field(..., ge=0)

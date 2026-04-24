@@ -83,7 +83,7 @@ class DatasetFromTIFF(Dataset):
                 if dataset == subset:
                     print(f"dataset: {dataset}")
                     tiffs = glob(os.path.join(img_path, dataset, "imgs", f"*.{file_extension}"))
-                    #tiffs = tiffs[:10]
+                    #tiffs = tiffs[:5]
                     self.imgs.extend([(tiff, dataset) for tiff in tiffs])
         
         if use_global_clip_limits:
