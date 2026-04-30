@@ -371,17 +371,17 @@ def log_validation_metrics(
     _experiment.log_metrics(metrics, epoch=epoch)
 
 def log_finetuning_validation_metrics(
-    val_loss: float,
-    val_preds: np.array,
-    val_y: np.array,
+    loss: float,
+    preds: np.array,
+    y: np.array,
     label_encoder,
     epoch: int,
 ) -> None:
     """Log validation metrics to Comet.ml.
 
     Args:
-        val_loss (float): Validation loss
-        val_macroF1 (float): Validation macro-f1 score
+        loss (float): Validation loss
+        macroF1 (float): Validation macro-f1 score
         epoch (int): Current epoch number
         variance_mae_correlation (Optional[float]): Pearson correlation between predicted variances and MAEs per channel
     """
@@ -391,7 +391,7 @@ def log_finetuning_validation_metrics(
     num_classes = len(label_encoder.get_dict())
 
     confusion_matrix = np.zeros((num_classes, num_classes), dtype=int)
-    for truth, pred in zip(val_y, val_preds):
+    for truth, pred in zip(y, preds):
         confusion_matrix[truth, pred] += 1
 
     TP = np.diag(confusion_matrix)
@@ -402,12 +402,12 @@ def log_finetuning_validation_metrics(
     recall = TP / (TP+FN+1e-10)
 
     F1score = 2*precision*recall / (precision+recall+1e-10)
-    val_macroF1 = np.mean(F1score)
+    macroF1 = np.mean(F1score)
 
 
     metrics = {
-        "val/loss": val_loss,
-        "val/macroF1": val_macroF1,
+        "loss": loss,
+        "macroF1": macroF1,
     }
     _experiment.log_metrics(metrics, epoch=epoch)
 

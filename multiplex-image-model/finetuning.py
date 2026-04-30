@@ -99,6 +99,7 @@ def train_masked(
     train_dataloader,
     val_dataloader,
     device,
+    subset,
     cli_feat_for_subset,
     melted_table,
     classes,
@@ -121,12 +122,48 @@ def train_masked(
 
     step = start_epoch * (len(train_dataloader) // gradient_accumulation_steps)
 
+    for p in model.encoder.parameters():
+        p.requires_grad = False
+
+    top_macro_f1 = 0.0
+    no_improvement = 0
+
     for epoch in range(start_epoch, epochs):
         model.train()
         all_preds, all_y = [], []
         running_loss = 0.0
         n_images = 0
 
+        if epoch == 5:
+            for p in model.encoder.parameters():
+                p.requires_grad = True
+
+            optimizer.add_param_group(
+                {"params": model.encoder.parameters(), "lr": config.encoder_lr}
+            )
+
+            # Recompute remaining step budget for scheduler
+            total_opt_steps = (len(train_dataloader) * epochs) // gradient_accumulation_steps
+            steps_left = max(1, total_opt_steps - step)
+
+            warmup_left = int(steps_left * config.frac_warmup_steps)
+            anneal_left = max(1, steps_left - warmup_left)
+
+            # Use peak_lr consistent with the LR you consider the "peak" reference.
+            # Because this scheduler is multiplicative, this only affects final_lr_mult.
+            scheduler = get_scheduler_with_warmup(
+                optimizer,
+                num_warmup_steps=warmup_left,
+                num_annealing_steps=anneal_left,
+                final_lr=config.final_lr,
+                peak_lr=config.classifier_lr,  # recommended
+                type="cosine",
+            )
+
+            print(
+                f"Unfroze encoder at epoch {epoch}, added encoder params. "
+                f"Scheduler created: steps_left={steps_left}, warmup_left={warmup_left}."
+            )
         for batch_idx, (bags, channel_ids_list, img_paths) in enumerate(
             tqdm(train_dataloader, desc=f"Epoch {epoch}")
         ):
@@ -171,18 +208,18 @@ def train_masked(
         all_y_np = torch.cat(all_y).numpy()
 
         train_metrics = log_finetuning_validation_metrics(
-            val_loss=epoch_loss,
-            val_preds=all_preds_np,
-            val_y=all_y_np,
+            loss=epoch_loss,
+            preds=all_preds_np,
+            y=all_y_np,
             label_encoder=label_encoder,
             epoch=epoch,
         )
         print(
-            f"[Train] loss={train_metrics['val/loss']:.4f}"
-            f"  macro-F1={train_metrics['val/macroF1']:.4f}"
+            f"[Train] loss={train_metrics['loss']:.4f}"
+            f"  macro-F1={train_metrics['macroF1']:.4f}"
         )
 
-        test_masked(
+        val_metrics = test_masked(
             model,
             val_dataloader,
             device,
@@ -194,6 +231,14 @@ def train_masked(
             label_encoder=label_encoder,
             step=step,
         )
+
+        if top_macro_f1 >= float(val_metrics["macroF1"]):
+            no_improvement += 1
+            if no_improvement > 7:
+                return
+        else:
+            top_macro_f1 = float(val_metrics["macroF1"])
+        
 
         checkpoint = {
             "model_state_dict": model.state_dict(),
@@ -286,7 +331,9 @@ if __name__ == "__main__":
 
     config = FinetuningConfig(**raw_config)
     if len(sys.argv) > 2:
-        config.datasets_subsets = [[sys.argv[2], sys.argv[3]]]
+        config.dataset_subsets = [[sys.argv[2], sys.argv[3]]]
+        if len(sys.argv) > 4:
+            config.device = sys.argv[4]
 
     device = config.device
     print(f"Using device: {device}")
@@ -407,19 +454,22 @@ if __name__ == "__main__":
         num_warmup_steps = int(total_steps * config.frac_warmup_steps)
         num_annealing_steps = total_steps - num_warmup_steps
 
+        for p in model.encoder.parameters():
+            p.requires_grad = False
+
         optimizer = optim.AdamW(
             [
-                {"params": model.encoder.parameters(), "lr": config.encoder_lr},
                 {"params": model.head.parameters(), "lr": config.classifier_lr}, 
             ],
             weight_decay=config.weight_decay,
         )
+
         scheduler = get_scheduler_with_warmup(
             optimizer,
             num_warmup_steps,
             num_annealing_steps,
             final_lr=config.final_lr,
-            peak_lr=config.encoder_lr,
+            peak_lr=config.classifier_lr,
             type="cosine",
         )
 
@@ -432,6 +482,7 @@ if __name__ == "__main__":
             train_dataloader,
             test_dataloader,
             device,
+            subset,
             cli_feat_for_subset,
             melted_table,
             classes,

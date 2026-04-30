@@ -22,8 +22,8 @@ head_type: abmil
 abmil:
   hidden_dim: 128
   gated: true
-  dropout: 0.3
-  classifier_hidden_dims: [512, 128]
+  dropout: 0.5
+  classifier_hidden_dims: [128]
 
 # Data configuration
 dataset_subsets: [['danenberg', 'Grade']]
@@ -32,7 +32,7 @@ tokenizer_config: configs/all_markers_tokenizer.yaml
 input_image_size: [64, 64]
 max_crops_per_image: 64
 num_workers: 8
-batch_size: 1
+batch_size: 4
 
 # Training configuration
 device: cuda

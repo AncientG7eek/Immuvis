@@ -105,11 +105,13 @@ class ABMILHead(TaskHead):
         classifier_hidden_dims: list[int] | None = None,
         gated: bool = True,
         dropout: float = 0.0,
+        classifier_dropout: float = 0.5,
     ):
         super().__init__()
         self.gated = gated
 
         self.dropout = nn.Dropout(p=dropout) if dropout > 0.0 else nn.Identity()
+        self.classifer_dropout = nn.Dropout(p=classifier_dropout) if classifier_dropout > 0.0 else nn.Identity()
 
         # --- attention V branch: h_k → tanh(V h_k) -------------------------
         self.attention_V = nn.Sequential(
@@ -130,9 +132,19 @@ class ABMILHead(TaskHead):
         # --- bag-level classifier -------------------------------------------
         classifier_hidden_dims = classifier_hidden_dims or []
         dims = [input_dim] + classifier_hidden_dims + [num_classes]
-        self.classifier = nn.Sequential(
-            *[nn.Linear(dims[i], dims[i + 1]) for i in range(len(dims) - 1)]
-        )
+
+        layers: list[nn.Module] = []
+        for i in range(len(dims) - 1):
+            in_dim, out_dim = dims[i], dims[i + 1]
+            layers.append(nn.Linear(in_dim, out_dim))
+
+            # add nonlinearity/dropout only on hidden layers (not on final logits)
+            if i < len(dims) - 2:
+                layers.append(nn.ReLU())
+                if classifier_dropout > 0.0:
+                    layers.append(nn.Dropout(p=classifier_dropout))
+
+        self.classifier = nn.Sequential(*layers)
 
     # -----------------------------------------------------------------------
 
