@@ -87,7 +87,8 @@ def get_a_subset(meta_table: pd.DataFrame, column: str, value: str|list):
 
 class LabelEncoder():
     def __init__(self, classes):
-        self.dict = {cls:i for i,cls in enumerate(sorted(set(classes)))}
+        self.dict = {cls:[1 if j == i else 0 for j in range(len(classes))] 
+                     for i,cls in enumerate(sorted(set(classes)))}
         self.inv_dict = {i:cls for cls,i in self.dict.items()}
 
     def encode(self, labels):

@@ -408,8 +408,11 @@ def log_finetuning_validation_metrics(
     metrics = {
         "loss": loss,
         "macroF1": macroF1,
+        "precission": precision,
+        "recall": recall
     }
     _experiment.log_metrics(metrics, epoch=epoch)
+    _experiment.log_confusion_matrix(y_true=y, y_predicted=preds)
 
     return metrics
 
