@@ -26,13 +26,15 @@ abmil:
   classifier_hidden_dims: [128]
 
 # Data configuration
+machine: local
 dataset_subsets: [['danenberg', 'Grade']]
 panel_config: configs/all_panels_config.yaml
+saliency_config: configs/saliency_config.yaml
 tokenizer_config: configs/all_markers_tokenizer.yaml
 input_image_size: [64, 64]
 max_crops_per_image: 64
 num_workers: 8
-batch_size: 4
+batch_size: 1
 
 # Training configuration
 device: cuda
@@ -43,8 +45,11 @@ weight_decay: 0.0001
 gradient_accumulation_steps: 4
 epochs: 20
 frac_warmup_steps: 0.1
-from_checkpoint: /raid_encrypted/immucan/models/ImmuVis-616-MSE-768-ma1.pth
-checkpoints_dir: models_finetuning/
+encoder_checkpoints_path:
+  szary: /raid_encrypted/immucan/models/
+  local: models/
+from_checkpoint: ImmuVis-616-MSE-768-ma1.pth
+finetuning_checkpoints_dir: models_finetuning/
 save_checkpoint_freq: 5
 
 # Comet.ml logging configuration

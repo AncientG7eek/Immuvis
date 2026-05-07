@@ -1,7 +1,7 @@
 """Configuration models and utilities using Pydantic for validation."""
 
 import os
-from typing import Any, Literal
+from typing import Any, Literal, Dict
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
@@ -327,16 +327,23 @@ class FinetuningConfig(BaseModel):
     """
 
     # Device / data
+    machine: str = Field(
+        ..., description="What machine the script is running on (important for file system - paths to data)"
+    )
+    encoder_checkpoints_path: Dict[str, str] = Field(
+        ..., description="Paths to checkpoints dir on different machines"
+    )
     device: str = Field(..., description="Device to use (e.g. 'cuda', 'cpu')")
     input_image_size: tuple[int, int] = Field(..., description="Crop size (H, W)")
     batch_size: int = Field(..., gt=0, description="Images per DataLoader batch")
     num_workers: int = Field(..., ge=0, description="DataLoader worker count")
-    max_crops_per_image: int = Field(
-        64, gt=0, description="Max GridCrop patches per image (OOM guard)"
+    max_crops_per_image: int | None = Field(
+        None, gt=0, description="Max GridCrop patches per image (OOM guard)"
     )
 
     # Config file paths
     panel_config: str = Field(..., description="Path to panel YAML")
+    saliency_config: str = Field(..., description="Path to saliency YAML")
     tokenizer_config: str = Field(..., description="Path to tokenizer YAML")
 
     # Dataset
@@ -368,7 +375,7 @@ class FinetuningConfig(BaseModel):
 
     # Checkpoint
     from_checkpoint: str | None = Field(None)
-    checkpoints_dir: str = Field("checkpoints")
+    finetuning_checkpoints_dir: str = Field("checkpoints")
     save_checkpoint_freq: int = Field(..., gt=0)
 
     # Comet.ml
@@ -388,7 +395,7 @@ class FinetuningConfig(BaseModel):
         if self.from_checkpoint == "last":
             if not self.run_name:
                 self.run_name = get_run_name()
-            last = f"{self.checkpoints_dir}/last_checkpoint-{self.run_name}.pth"
+            last = f"{self.finetuning_checkpoints_dir}/last_checkpoint-{self.run_name}.pth"
             if os.path.exists(last):
                 self.from_checkpoint = last
                 return True
@@ -398,3 +405,8 @@ class FinetuningConfig(BaseModel):
         return True
 
     model_config = ConfigDict(extra="forbid", populate_by_name=True)
+
+
+class SaliencyConfig(BaseModel):
+    channel_groups: dict[str, list[str]] = Field(default_factory=dict)
+    markers_names_map: dict[int, str] = Field(default_factory=dict)

@@ -18,7 +18,7 @@ class DatasetFromTIFF(Dataset):
         panels_config: dict,
         split: str,
         marker_tokenizer: dict[str, int],
-        run_on_hpc: bool = True,
+        machine: str = "local",
         subset=None,
         transform=None,
         use_preprocessing: bool = True,
@@ -71,9 +71,9 @@ class DatasetFromTIFF(Dataset):
             for dataset in panels_config["datasets"]
         }
         
-        if run_on_hpc:
-            img_path = panels_config["paths"]["server"][split]
-        else: 
+        if machine == "szary":
+            img_path = panels_config["paths"]["szary"][split]
+        elif machine == "local": 
             img_path = panels_config["paths"]["local"][split]
 
         self.imgs = []  # tuples of (img_path, dataset)
@@ -83,7 +83,7 @@ class DatasetFromTIFF(Dataset):
                 if dataset == subset:
                     print(f"dataset: {dataset}")
                     tiffs = glob(os.path.join(img_path, dataset, "imgs", f"*.{file_extension}"))
-                    #tiffs = tiffs[:5]
+                    tiffs = tiffs[:2]
                     self.imgs.extend([(tiff, dataset) for tiff in tiffs])
         
         if use_global_clip_limits:
@@ -185,8 +185,8 @@ class DatasetFromTIFF(Dataset):
     #     return torch.tensor(img), channel_ids, dataset, img_path
     
         if self.transform:
-            return crops, coords, channel_ids, dataset, img_path
-        return crops, channel_ids, dataset, img_path
+            return crops, coords, channel_ids, dataset, img_path, img
+        return crops, channel_ids, dataset, img_path, img
         
 
 
@@ -271,20 +271,28 @@ class GridCrop:
         num_rows = h // self.crop_size
         num_cols = w // self.crop_size
         
-        for i in range(num_rows):
-            for j in range(num_cols):
+        
+        if self.max_crops and (num_rows * num_cols) > self.max_crops:
+            print(f"Number of crops exceeded {self.max_crops}. Taking a central square...")
+            # Find the largest square side (in number of crops) that fits in max_crops
+            side_len = min(int(self.max_crops ** 0.5), num_rows, num_cols)
+            
+            # Center the square
+            row_start = (num_rows - side_len) // 2
+            col_start = (num_cols - side_len) // 2
+            row_end = row_start + side_len
+            col_end = col_start + side_len
+        else:
+            row_start, col_start = 0, 0
+            row_end, col_end = num_rows, num_cols
+            
+        for i in range(row_start, row_end):
+            for j in range(col_start, col_end):
                 top = i * self.crop_size
                 left = j * self.crop_size
                 c = crop(img, top, left, self.crop_size, self.crop_size)
                 crops.append(c.numpy())
                 coordinates.append(((int(top), int(top) + self.crop_size),
                                     (int(left), int(left) + self.crop_size)))
-        
-        if len(crops) > self.max_crops:
-            print(f"Number of crops exceeded {self.max_crops}. Downsampling...")
-            idx = np.random.choice(len(crops), self.max_crops, replace=False)
-            idx.sort()
-            crops = [crops[i] for i in idx]
-            coordinates = [coordinates[i] for i in idx]
-        
+        print(f"len crops: {len(crops)}")
         return crops, np.array(coordinates)

@@ -2,7 +2,7 @@ paths:
   local:
     train: /home/kacper/Documents/oświata/UW/2nd_yr/magisterka/split/train
     test: /home/kacper/Documents/oświata/UW/2nd_yr/magisterka/split/test
-  server: 
+  szary: 
     train: /raid_encrypted/immucan/immuvis_split/train
     test: /raid_encrypted/immucan/immuvis_split/test
 datasets:

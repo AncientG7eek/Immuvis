@@ -1,6 +1,7 @@
 import os
 import pandas as pd
 import numpy as np
+from sklearn.preprocessing import LabelBinarizer
 
 def concat_metadata(emb_dir: str, train: bool):
     """ 
@@ -87,9 +88,14 @@ def get_a_subset(meta_table: pd.DataFrame, column: str, value: str|list):
 
 class LabelEncoder():
     def __init__(self, classes):
-        self.dict = {cls:[1 if j == i else 0 for j in range(len(classes))] 
-                     for i,cls in enumerate(sorted(set(classes)))}
+        self.classes = classes
+        self.dict = {cls:i for i,cls in enumerate(sorted(set(classes)))}
         self.inv_dict = {i:cls for cls,i in self.dict.items()}
+        # self.binarized = {cls:''.join([1 if j == i else 0 for j in range(len(classes))]) 
+        #              for i,cls in self.dict.items()}
+        # self.inv_binarized = {i:cls for cls,i in self.binarized.items()}
+        self.label_binarizer = LabelBinarizer().fit(classes)
+        
 
     def encode(self, labels):
         return [self.dict[label] for label in labels]
@@ -97,5 +103,10 @@ class LabelEncoder():
     def decode(self, labels):
         return [self.inv_dict[label] for label in labels]
     
+    def binarize(self, labels):
+        return self.label_binarizer.transform(labels)
+    
     def get_dict(self):
         return self.dict
+
+

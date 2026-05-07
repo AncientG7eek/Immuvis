@@ -21,6 +21,7 @@ from multiplex_model.utils import (
     get_run_name,
     get_scheduler_with_warmup,
     init_experiment,
+    log_finetuning_training_metrics,
     log_finetuning_validation_metrics,
 )
 from multiplex_model.utils.configuration import FinetuningConfig
@@ -64,14 +65,16 @@ def bag_collate(batch):
         channel_ids : list of Tensor[C], one per image
         img_paths   : list of str (full path), one per image
     """
-    bags, channel_ids_list, img_paths = [], [], []
-    for crops, _coords, channel_ids, _dataset, img_paths_item in batch:
+    bags, coords_list, channel_ids_list, img_paths, imgs = [], [], [], [], []
+    for crops, coords, channel_ids, _dataset, img_paths_item, img in batch:
         bags.append(crops)
+        coords_list.append(coords)
         channel_ids_list.append(channel_ids)
         img_paths.append(
             img_paths_item[0] if isinstance(img_paths_item, list) else img_paths_item
         )
-    return bags, channel_ids_list, img_paths
+        imgs.append(img)
+    return bags, coords_list, channel_ids_list, img_paths, imgs
 
 
 def _get_label(
@@ -103,12 +106,13 @@ def train_masked(
     cli_feat_for_subset,
     melted_table,
     classes,
+    saliency_config,
     marker_names_map,
     epochs=10,
     gradient_accumulation_steps=1,
     start_epoch=0,
     save_checkpoint_every=5,
-    checkpoints_path="checkpoints",
+    finetuning_checkpoints_path="checkpoints",
 ):
     """Fine-tune model on clinical classification, one image (bag) per step."""
     
@@ -118,7 +122,7 @@ def train_masked(
     class_weights = calc_class_imbalance(melted_table, subset, cli_feat_for_subset, classes, device)
     loss_fn = torch.nn.CrossEntropyLoss(weight=class_weights)
 
-    os.makedirs(checkpoints_path, exist_ok=True)
+    os.makedirs(finetuning_checkpoints_path, exist_ok=True)
 
     step = start_epoch * (len(train_dataloader) // gradient_accumulation_steps)
 
@@ -164,7 +168,7 @@ def train_masked(
                 f"Unfroze encoder at epoch {epoch}, added encoder params. "
                 f"Scheduler created: steps_left={steps_left}, warmup_left={warmup_left}."
             )
-        for batch_idx, (bags, channel_ids_list, img_paths) in enumerate(
+        for batch_idx, (bags, _coords, channel_ids_list, img_paths, _imgs) in enumerate(
             tqdm(train_dataloader, desc=f"Epoch {epoch}")
         ):
             # With PanelBatchSampler batch_size=1 each outer iter = 1 image.
@@ -207,7 +211,8 @@ def train_masked(
         all_preds_np = torch.cat(all_preds).numpy()
         all_y_np = torch.cat(all_y).numpy()
 
-        train_metrics = log_finetuning_validation_metrics(
+        train_metrics = log_finetuning_training_metrics(
+            lr=scheduler.get_last_lr()[0],
             loss=epoch_loss,
             preds=all_preds_np,
             y=all_y_np,
@@ -215,9 +220,12 @@ def train_masked(
             epoch=epoch,
         )
         print(
-            f"[Train] loss={train_metrics['loss']:.4f}"
-            f"  macro-F1={train_metrics['macroF1']:.4f}"
+            f"[Train] loss={train_metrics['train/loss']:.4f}"
+            f"  macro-F1={train_metrics['train/macroF1']:.4f}"
         )
+
+        current_saliency_config = SALIENCY_CONFIG[subset]
+
 
         val_metrics = test_masked(
             model,
@@ -228,16 +236,17 @@ def train_masked(
             melted_table=melted_table,
             cli_feat_for_subset=cli_feat_for_subset,
             classes=classes,
+            current_saliency_config=current_saliency_config,
             label_encoder=label_encoder,
             step=step,
         )
 
-        if top_macro_f1 >= float(val_metrics["macroF1"]):
+        if top_macro_f1 >= float(val_metrics["val/macroF1"]):
             no_improvement += 1
             if no_improvement > 7:
                 return
         else:
-            top_macro_f1 = float(val_metrics["macroF1"])
+            top_macro_f1 = float(val_metrics["val/macroF1"])
         
 
         checkpoint = {
@@ -249,11 +258,11 @@ def train_masked(
         if (epoch + 1) % save_checkpoint_every == 0:
             torch.save(
                 checkpoint,
-                f"{checkpoints_path}/checkpoint-{run_name}-epoch_{epoch}.pth",
+                f"{finetuning_checkpoints_path}/checkpoint-{run_name}-epoch_{epoch}.pth",
             )
-        torch.save(checkpoint, f"{checkpoints_path}/last_checkpoint-{run_name}.pth")
+        torch.save(checkpoint, f"{finetuning_checkpoints_path}/last_checkpoint-{run_name}.pth")
 
-    final_model_path = f"{checkpoints_path}/final_model-{run_name}.pth"
+    final_model_path = f"{finetuning_checkpoints_path}/final_model-{run_name}.pth"
     print(f"Training completed. Saving final model at {final_model_path}...")
     torch.save({"model_state_dict": model.state_dict()}, final_model_path)
 
@@ -267,6 +276,7 @@ def test_masked(
     melted_table,
     cli_feat_for_subset,
     classes,
+    current_saliency_config,
     label_encoder,
     step,
 ):
@@ -274,14 +284,16 @@ def test_masked(
     model.eval()
     loss_fn = torch.nn.CrossEntropyLoss()
     running_loss = 0.0
-    all_preds, all_y = [], []
+    all_logits, all_preds, all_y = [], [], []
     n_images = 0
+    n_images_with_weight = 0
+    saliency_data = []
 
     with torch.no_grad():
-        for bags, channel_ids_list, img_paths in tqdm(
+        for bags, coords_list, channel_ids_list, img_paths, imgs in tqdm(
             test_dataloader, desc=f"Validation epoch {epoch}"
         ):
-            for crops, channel_ids, img_path_full in zip(bags, channel_ids_list, img_paths):
+            for crops, coords, channel_ids, img_path_full, img in zip(bags, coords_list, channel_ids_list, img_paths, imgs):
                 img_stem = img_path_full.split("/")[-1].split(".")[0]
                 y = _get_label(img_stem, melted_table, cli_feat_for_subset, label_encoder, device)
                 if y is None:
@@ -291,13 +303,32 @@ def test_masked(
                 channel_ids = channel_ids.to(device, dtype=torch.long)
 
                 with autocast(device_type="cuda", dtype=torch.bfloat16):
-                    logits = model(crops, channel_ids)   # (1, num_classes)
+                    if n_images_with_weight < 5:
+                        
+                        res = model(crops, channel_ids, return_attention=True)
+                        if isinstance(res, tuple):
+                            logits, weights = res
+                        else:
+                            logits, weights = res, None
+                    else:
+                        logits = model(crops, channel_ids)
+
                     loss = loss_fn(logits, y)
 
+                all_logits.append(logits.cpu())
                 all_preds.append(torch.argmax(logits.detach(), dim=1).cpu())
                 all_y.append(y.cpu())
                 running_loss += loss.item()
                 n_images += 1
+                
+                if n_images_with_weight < 5:
+                    saliency_data.append([img, coords, weights])
+                    # store numpy 1D weights or None
+                    if weights is not None:
+                        w_t = weights.detach().cpu() if isinstance(weights, torch.Tensor) else weights
+                        w_np = np.asarray(w_t).squeeze()
+                        saliency_data.append([img, coords, w_np])
+                        n_images_with_weight += 1
 
     if n_images == 0:
         print(f"Epoch {epoch}: no valid validation batches")
@@ -308,9 +339,13 @@ def test_masked(
     all_y_np = torch.cat(all_y).numpy()
 
     val_metrics = log_finetuning_validation_metrics(
-        val_loss=val_loss,
-        val_preds=all_preds_np,
-        val_y=all_y_np,
+        loss=val_loss,
+        logits=all_logits,
+        preds=all_preds_np,
+        y=all_y_np,
+        saliency_data=saliency_data,
+        current_saliency_config=current_saliency_config,
+        crop_size=config.input_image_size[0],
         label_encoder=label_encoder,
         epoch=epoch,
     )
@@ -339,6 +374,7 @@ if __name__ == "__main__":
     print(f"Using device: {device}")
 
     PANEL_CONFIG = YAML().load(open(config.panel_config))
+    SALIENCY_CONFIG = YAML().load(open(config.saliency_config))
     TOKENIZER = YAML().load(open(config.tokenizer_config))
     INV_TOKENIZER = {v: k for k, v in TOKENIZER.items()}
 
@@ -358,6 +394,7 @@ if __name__ == "__main__":
             panels_config=PANEL_CONFIG,
             split="train",
             marker_tokenizer=TOKENIZER,
+            machine=config.machine,
             subset=subset,
             transform=train_transform,
             use_preprocessing=False,
@@ -371,6 +408,7 @@ if __name__ == "__main__":
             panels_config=PANEL_CONFIG,
             split="test",
             marker_tokenizer=TOKENIZER,
+            machine=config.machine,
             subset=subset,
             transform=test_transform,
             use_preprocessing=False,
@@ -434,8 +472,9 @@ if __name__ == "__main__":
         ).to(device)
 
         if config.resolve_checkpoint():
-            print(f"Loading encoder weights from: {config.from_checkpoint}")
-            ckpt = torch.load(config.from_checkpoint, map_location=device)
+            encoder_checkpoint_path = os.path.join(config.encoder_checkpoints_path[config.machine], config.from_checkpoint)
+            print(f"Loading encoder weights from: {encoder_checkpoint_path}")
+            ckpt = torch.load(encoder_checkpoint_path, map_location=device)
             state_dict = ckpt.get("model_state_dict", ckpt)
             encoder_keys = {
                 k[len("encoder."):]: v
@@ -486,12 +525,13 @@ if __name__ == "__main__":
             cli_feat_for_subset,
             melted_table,
             classes,
+            saliency_config=SALIENCY_CONFIG,
             marker_names_map=INV_TOKENIZER,
             epochs=config.epochs,
             start_epoch=0,
             gradient_accumulation_steps=config.gradient_accumulation_steps,
             save_checkpoint_every=config.save_checkpoint_freq,
-            checkpoints_path=config.checkpoints_dir,
+            finetuning_checkpoints_path=config.finetuning_checkpoints_dir,
         )
 
         finish_experiment()

@@ -566,9 +566,24 @@ class FinetuningModel(nn.Module):
         self,
         x: torch.Tensor,
         channel_ids: torch.Tensor,
+        return_attention: bool = None,
     ) -> torch.Tensor:
         instance_emb = self.encode_crops(x, channel_ids)  # (N_crops, E)
-        return self.head(instance_emb)                     # (1, num_classes)
+        
+        if return_attention:
+            # Prefer a single call API if the head exposes it
+            if hasattr(self.head, "forward_with_attention"):
+                logits, weights = self.head.forward_with_attention(instance_emb)
+            else:
+                logits = self.head(instance_emb)
+                weights = (
+                    self.head.attention_weights(instance_emb)
+                    if hasattr(self.head, "attention_weights")
+                    else None
+                )
+            return logits, weights
+
+        return self.head(instance_emb)                  # (1, num_classes)
 
 
 # ---------------------------------------------------------------------------
