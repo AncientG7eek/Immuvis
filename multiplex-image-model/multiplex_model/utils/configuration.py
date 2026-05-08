@@ -360,6 +360,25 @@ class FinetuningConfig(BaseModel):
     gradient_accumulation_steps: int = Field(..., gt=0)
     epochs: int = Field(..., gt=0)
 
+    # Imbalance handling
+    imbalance_strategy: Literal[
+        "none", "class_weight", "weighted_sampler"
+    ] = Field(
+        "class_weight",
+        description=(
+            "How to handle class imbalance: 'class_weight' uses loss weights, "
+            "'weighted_sampler' oversamples minority classes, 'none' disables both."
+        ),
+    )
+    weighted_sampler_num_samples: int | None = Field(
+        None,
+        gt=0,
+        description=(
+            "Optional number of samples per epoch when using weighted_sampler. "
+            "Defaults to number of labeled samples if None."
+        ),
+    )
+
     # Model architecture
     head_type: Literal["logistic", "abmil"] = Field(
         "logistic",

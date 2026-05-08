@@ -8,7 +8,7 @@ import torch
 import torch.optim as optim
 from ruamel.yaml import YAML
 from torch.amp import GradScaler, autocast
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, WeightedRandomSampler
 from tqdm import tqdm
 from sklearn.utils.class_weight import compute_class_weight
 
@@ -48,6 +48,61 @@ def calc_class_imbalance(melted_table, subset, cli_feat_for_subset, classes, dev
 
     print(f"Using class weights: {class_weights_tensor}")
     return class_weights_tensor
+
+
+def build_weighted_sampler(
+    dataset: DatasetFromTIFF,
+    melted_table: pd.DataFrame,
+    cli_feat_for_subset: str,
+    classes: np.ndarray,
+    label_encoder: LabelEncoder,
+    num_samples: int | None = None,
+) -> tuple[WeightedRandomSampler, dict[str, int]]:
+    """Create a WeightedRandomSampler over dataset indices using clinical labels."""
+    class_counts = {cls: 0 for cls in classes}
+    sample_weights = []
+
+    for img_path, _dataset in dataset.imgs:
+        img_stem = os.path.basename(img_path).split(".")[0]
+        label = _get_label(
+            img_stem,
+            melted_table,
+            cli_feat_for_subset,
+            label_encoder,
+            device=torch.device("cpu"),
+        )
+        if label is None:
+            sample_weights.append(0.0)
+            continue
+        decoded = label_encoder.decode([label.item()])[0]
+        class_counts[decoded] += 1
+        sample_weights.append(1.0)  # placeholder, normalized below
+
+    if sum(sample_weights) == 0:
+        raise ValueError("No labeled samples found for weighted sampling.")
+
+    counts = {cls: max(1, count) for cls, count in class_counts.items()}
+    for idx, (img_path, _dataset) in enumerate(dataset.imgs):
+        if sample_weights[idx] == 0.0:
+            continue
+        img_stem = os.path.basename(img_path).split(".")[0]
+        label = _get_label(
+            img_stem,
+            melted_table,
+            cli_feat_for_subset,
+            label_encoder,
+            device=torch.device("cpu"),
+        )
+        decoded = label_encoder.decode([label.item()])[0]
+        sample_weights[idx] = 1.0 / counts[decoded]
+
+    samples_weight = torch.tensor(sample_weights, dtype=torch.double)
+    effective_samples = int(samples_weight.sum().item())
+    if num_samples is None:
+        num_samples = max(1, effective_samples)
+
+    sampler = WeightedRandomSampler(samples_weight, num_samples=num_samples, replacement=True)
+    return sampler, class_counts
 
 
 def bag_collate(batch):
@@ -113,15 +168,24 @@ def train_masked(
     start_epoch=0,
     save_checkpoint_every=5,
     finetuning_checkpoints_path="checkpoints",
+    imbalance_strategy: str = "class_weight",
 ):
     """Fine-tune model on clinical classification, one image (bag) per step."""
     
     scaler = GradScaler()
     run_name = get_run_name()
     label_encoder = LabelEncoder(classes)
-    class_weights = calc_class_imbalance(melted_table, subset, cli_feat_for_subset, classes, device)
-    loss_fn = torch.nn.CrossEntropyLoss(weight=class_weights)
+    if imbalance_strategy == "class_weight":
+        class_weights = calc_class_imbalance(
+            melted_table, subset, cli_feat_for_subset, classes, device
+        )
+        loss_fn = torch.nn.CrossEntropyLoss(weight=class_weights)
+    else:
+        loss_fn = torch.nn.CrossEntropyLoss()
 
+    # smallest_class_size = min(get_a_subset(get_a_subset(melted_table, "img_name", img_stem), "feature", cli_feat_for_subset).dropna(axis="value").value_counts("value"))
+    # print(smallest_class_size)
+    
     os.makedirs(finetuning_checkpoints_path, exist_ok=True)
 
     step = start_epoch * (len(train_dataloader) // gradient_accumulation_steps)
@@ -137,6 +201,7 @@ def train_masked(
         all_preds, all_y = [], []
         running_loss = 0.0
         n_images = 0
+        class_count = {c:0 for c in classes}
 
         if epoch == 5:
             for p in model.encoder.parameters():
@@ -179,6 +244,11 @@ def train_masked(
                 if y is None:
                     print(f"Skipping {img_stem} — no clinical data")
                     continue
+                # else:
+                #     y_decoded = label_encoder.decode([y.item()])[0]
+                #     if class_count[y_decoded] > smallest_class_size:
+                #         continue
+                #     class_count[y_decoded] += 1
 
                 crops = crops.to(device, dtype=torch.float32)
                 channel_ids = channel_ids.to(device, dtype=torch.long)
@@ -423,15 +493,40 @@ if __name__ == "__main__":
         train_batch_sampler = PanelBatchSampler(train_dataset, config.batch_size)
         test_batch_sampler  = PanelBatchSampler(test_dataset, config.batch_size, shuffle=False)
 
-        train_dataloader = DataLoader(
-            train_dataset,
-            batch_sampler=train_batch_sampler,
-            num_workers=config.num_workers,
-            pin_memory=False,
-            persistent_workers=True,
-            prefetch_factor=2,
-            collate_fn=bag_collate,
-        )
+        label_encoder = LabelEncoder(classes)
+        train_sampler = None
+        if config.imbalance_strategy == "weighted_sampler":
+            train_sampler, class_counts = build_weighted_sampler(
+                train_dataset,
+                melted_table,
+                cli_feat_for_subset,
+                classes,
+                label_encoder,
+                num_samples=config.weighted_sampler_num_samples,
+            )
+            print(f"Weighted sampler class counts: {class_counts}")
+
+        if train_sampler is None:
+            train_dataloader = DataLoader(
+                train_dataset,
+                batch_sampler=train_batch_sampler,
+                num_workers=config.num_workers,
+                pin_memory=False,
+                persistent_workers=True,
+                prefetch_factor=2,
+                collate_fn=bag_collate,
+            )
+        else:
+            train_dataloader = DataLoader(
+                train_dataset,
+                sampler=train_sampler,
+                batch_size=config.batch_size,
+                num_workers=config.num_workers,
+                pin_memory=False,
+                persistent_workers=True,
+                prefetch_factor=2,
+                collate_fn=bag_collate,
+            )
         test_dataloader = DataLoader(
             test_dataset,
             batch_sampler=test_batch_sampler,
@@ -532,6 +627,7 @@ if __name__ == "__main__":
             gradient_accumulation_steps=config.gradient_accumulation_steps,
             save_checkpoint_every=config.save_checkpoint_freq,
             finetuning_checkpoints_path=config.finetuning_checkpoints_dir,
+            imbalance_strategy=config.imbalance_strategy,
         )
 
         finish_experiment()

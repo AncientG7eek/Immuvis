@@ -140,6 +140,8 @@ def plot_attention_saliency_imc(
         group_colors=group_colors,
     )
 
+    if hasattr(weights, 'cpu'):  # Check if it's a torch.Tensor
+        weights = weights.detach().cpu().numpy()
     weights = np.asarray(weights).squeeze()
     crop_coords = np.asarray(crop_coords)
     if weights.ndim == 0:
@@ -148,7 +150,7 @@ def plot_attention_saliency_imc(
         raise ValueError(f"num crops {crop_coords.shape[0]} != num weights {weights.shape[0]}")
     
     # Convert (x,y) top-left to (x,y,w,h) top-left if shape is Nx2
-    print(crop_coords.shape)
+   
     if crop_coords.ndim == 3 and crop_coords.shape[1:] == (2, 2):
         top = crop_coords[:, 0, 0]
         bottom = crop_coords[:, 0, 1]
@@ -664,10 +666,10 @@ def log_finetuning_training_metrics(
 
 def plot_roc_curve(n_classes, y_test, y_score, label_encoder):
     # Normalize inputs
-    if isinstance(y_score, torch.Tensor):
-        y_score = y_score.detach().cpu().numpy()
-    else:
-        y_score = np.asarray(y_score)
+
+
+    y_score = torch.cat(y_score).to(torch.float32).detach().cpu().numpy()
+    
     y_test = np.asarray(y_test)
 
     # Collapse any singleton channel dim like (n,1,c) -> (n,c) or (n,c,1) -> (n,c)
@@ -682,13 +684,12 @@ def plot_roc_curve(n_classes, y_test, y_score, label_encoder):
 
 
     # Debug-friendly shapes
-    print(f"y_test.shape: {y_test.shape}")
-    print(f"y_score.shape: {y_score.shape}")
+   
 
     # Binarize true labels
     y_onehot_test = label_encoder.binarize(y_test)
     y_onehot_test = np.asarray(y_onehot_test)
-    print(f"y_onehot_test.shape: {y_onehot_test.shape}")
+  
 
     # Ensure scores are (n_samples, n_classes)
     if y_score.ndim == 2 and y_score.shape[0] == n_classes and y_score.shape[1] != n_classes:
@@ -748,18 +749,26 @@ def plot_roc_curve(n_classes, y_test, y_score, label_encoder):
         ax.plot(fpr["macro"], tpr["macro"], label=f"macro-average ROC (AUC = {roc_auc.get('macro', float('nan')):.2f})",
                 color="navy", linestyle=":", linewidth=2)
 
-    colors = cycle(["aqua", "darkorange", "cornflowerblue"])
-    class_names = list(label_encoder.get_dict().values()) if hasattr(label_encoder, "get_dict") else [str(i) for i in range(n_classes)]
+    colors = cycle(["aqua", "darkorange", "cornflowerblue", "olive", "purple", "teal", "gold"])
+    if hasattr(label_encoder, "get_dict"):
+        class_dict = label_encoder.get_dict()
+        class_names = [None] * n_classes
+        for cls_name, cls_idx in class_dict.items():
+            if 0 <= cls_idx < n_classes:
+                class_names[cls_idx] = str(cls_name)
+        class_names = [name if name is not None else str(i) for i, name in enumerate(class_names)]
+    else:
+        class_names = [str(i) for i in range(n_classes)]
+
     for class_id, color in zip(range(n_classes), colors):
         if np.isnan(roc_auc.get(class_id, np.nan)):
             continue
-        RocCurveDisplay.from_predictions(
-            y_onehot_test[:, class_id],
-            y_score[:, class_id],
-            name=f"ROC for {class_names[class_id]}",
-            curve_kwargs=dict(color=color),
-            ax=ax,
-            despine=True,
+        ax.plot(
+            fpr[class_id],
+            tpr[class_id],
+            color=color,
+            linewidth=1.5,
+            label=f"ROC for {class_names[class_id]} (AUC = {roc_auc[class_id]:.2f})",
         )
 
     ax.set(xlabel="False Positive Rate", ylabel="True Positive Rate",
