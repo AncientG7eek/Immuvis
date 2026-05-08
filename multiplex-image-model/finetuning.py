@@ -8,7 +8,7 @@ import torch
 import torch.optim as optim
 from ruamel.yaml import YAML
 from torch.amp import GradScaler, autocast
-from torch.utils.data import DataLoader, WeightedRandomSampler
+from torch.utils.data import DataLoader, WeightedRandomSampler, random_split
 from tqdm import tqdm
 from sklearn.utils.class_weight import compute_class_weight
 
@@ -52,6 +52,7 @@ def calc_class_imbalance(melted_table, subset, cli_feat_for_subset, classes, dev
 
 def build_weighted_sampler(
     dataset: DatasetFromTIFF,
+    indices: list[int] | None,
     melted_table: pd.DataFrame,
     cli_feat_for_subset: str,
     classes: np.ndarray,
@@ -61,8 +62,11 @@ def build_weighted_sampler(
     """Create a WeightedRandomSampler over dataset indices using clinical labels."""
     class_counts = {cls: 0 for cls in classes}
     sample_weights = []
+    if indices is None:
+        indices = list(range(len(dataset.imgs)))
 
-    for img_path, _dataset in dataset.imgs:
+    for idx in indices:
+        img_path, _dataset = dataset.imgs[idx]
         img_stem = os.path.basename(img_path).split(".")[0]
         label = _get_label(
             img_stem,
@@ -82,9 +86,10 @@ def build_weighted_sampler(
         raise ValueError("No labeled samples found for weighted sampling.")
 
     counts = {cls: max(1, count) for cls, count in class_counts.items()}
-    for idx, (img_path, _dataset) in enumerate(dataset.imgs):
-        if sample_weights[idx] == 0.0:
+    for local_idx, idx in enumerate(indices):
+        if sample_weights[local_idx] == 0.0:
             continue
+        img_path, _dataset = dataset.imgs[idx]
         img_stem = os.path.basename(img_path).split(".")[0]
         label = _get_label(
             img_stem,
@@ -93,8 +98,8 @@ def build_weighted_sampler(
             label_encoder,
             device=torch.device("cpu"),
         )
-        decoded = label_encoder.decode([label.item()])[0]
-        sample_weights[idx] = 1.0 / counts[decoded]
+    decoded = label_encoder.decode([label.item()])[0]
+    sample_weights[local_idx] = 1.0 / counts[decoded]
 
     samples_weight = torch.tensor(sample_weights, dtype=torch.double)
     effective_samples = int(samples_weight.sum().item())
@@ -195,6 +200,7 @@ def train_masked(
 
     top_macro_f1 = 0.0
     no_improvement = 0
+    best_checkpoint_path = None
 
     for epoch in range(start_epoch, epochs):
         model.train()
@@ -310,31 +316,39 @@ def train_masked(
             label_encoder=label_encoder,
             step=step,
         )
-
-        if top_macro_f1 >= float(val_metrics["val/macroF1"]):
-            no_improvement += 1
-            if no_improvement > 7:
-                return
+        if not val_metrics or "val/macroF1" not in val_metrics:
+            print("Validation metrics missing macro-F1; skipping best checkpoint update.")
         else:
-            top_macro_f1 = float(val_metrics["val/macroF1"])
-        
+            current_macro_f1 = float(val_metrics["val/macroF1"])
+            if top_macro_f1 >= current_macro_f1:
+                no_improvement += 1
+                if no_improvement > 7:
+                    return best_checkpoint_path
+            else:
+                top_macro_f1 = current_macro_f1
 
-        checkpoint = {
-            "model_state_dict": model.state_dict(),
-            "optimizer_state_dict": optimizer.state_dict(),
-            "scheduler_state_dict": scheduler.state_dict(),
-            "epoch": epoch,
-        }
-        if (epoch + 1) % save_checkpoint_every == 0:
-            torch.save(
-                checkpoint,
-                f"{finetuning_checkpoints_path}/checkpoint-{run_name}-epoch_{epoch}.pth",
-            )
-        torch.save(checkpoint, f"{finetuning_checkpoints_path}/last_checkpoint-{run_name}.pth")
+            checkpoint = {
+                "model_state_dict": model.state_dict(),
+                "optimizer_state_dict": optimizer.state_dict(),
+                "scheduler_state_dict": scheduler.state_dict(),
+                "epoch": epoch,
+            }
+            if (epoch + 1) % save_checkpoint_every == 0:
+                torch.save(
+                    checkpoint,
+                    f"{finetuning_checkpoints_path}/checkpoint-{run_name}-epoch_{epoch}.pth",
+                )
+            torch.save(checkpoint, f"{finetuning_checkpoints_path}/last_checkpoint-{run_name}.pth")
+            if top_macro_f1 == current_macro_f1:
+                best_checkpoint_path = (
+                    f"{finetuning_checkpoints_path}/best_checkpoint-{run_name}.pth"
+                )
+                torch.save(checkpoint, best_checkpoint_path)
 
     final_model_path = f"{finetuning_checkpoints_path}/final_model-{run_name}.pth"
     print(f"Training completed. Saving final model at {final_model_path}...")
     torch.save({"model_state_dict": model.state_dict()}, final_model_path)
+    return best_checkpoint_path
 
 
 def test_masked(
@@ -490,14 +504,26 @@ if __name__ == "__main__":
         )
         print(f"train size: {len(train_dataset)}  test size: {len(test_dataset)}")
 
-        train_batch_sampler = PanelBatchSampler(train_dataset, config.batch_size)
-        test_batch_sampler  = PanelBatchSampler(test_dataset, config.batch_size, shuffle=False)
-
         label_encoder = LabelEncoder(classes)
         train_sampler = None
+        train_indices = list(range(len(train_dataset)))
+        val_dataset = None
+        if config.val_split_ratio > 0:
+            val_size = int(len(train_dataset) * config.val_split_ratio)
+            train_size = len(train_dataset) - val_size
+            generator = torch.Generator().manual_seed(config.val_split_seed)
+            train_subset, val_subset = random_split(
+                train_dataset, [train_size, val_size], generator=generator
+            )
+            train_dataset = train_subset
+            val_dataset = val_subset
+            train_indices = list(train_subset.indices)
+            print(f"train/val split: {train_size}/{val_size}")
+
         if config.imbalance_strategy == "weighted_sampler":
             train_sampler, class_counts = build_weighted_sampler(
-                train_dataset,
+                train_dataset.dataset if hasattr(train_dataset, "dataset") else train_dataset,
+                train_indices,
                 melted_table,
                 cli_feat_for_subset,
                 classes,
@@ -509,7 +535,8 @@ if __name__ == "__main__":
         if train_sampler is None:
             train_dataloader = DataLoader(
                 train_dataset,
-                batch_sampler=train_batch_sampler,
+                batch_size=config.batch_size,
+                shuffle=True,
                 num_workers=config.num_workers,
                 pin_memory=False,
                 persistent_workers=True,
@@ -527,9 +554,25 @@ if __name__ == "__main__":
                 prefetch_factor=2,
                 collate_fn=bag_collate,
             )
+
+        if val_dataset is None:
+            val_dataset = test_dataset
+            print("No val split requested; using test set for validation.")
+
+        val_dataloader = DataLoader(
+            val_dataset,
+            batch_size=config.batch_size,
+            shuffle=False,
+            num_workers=config.num_workers,
+            pin_memory=False,
+            persistent_workers=True,
+            prefetch_factor=2,
+            collate_fn=bag_collate,
+        )
         test_dataloader = DataLoader(
             test_dataset,
-            batch_sampler=test_batch_sampler,
+            batch_size=config.batch_size,
+            shuffle=False,
             num_workers=config.num_workers,
             pin_memory=False,
             persistent_workers=True,
@@ -609,12 +652,12 @@ if __name__ == "__main__":
 
         init_experiment(config.model_dump())
 
-        train_masked(
+        best_checkpoint = train_masked(
             model,
             optimizer,
             scheduler,
             train_dataloader,
-            test_dataloader,
+            val_dataloader,
             device,
             subset,
             cli_feat_for_subset,
@@ -628,6 +671,25 @@ if __name__ == "__main__":
             save_checkpoint_every=config.save_checkpoint_freq,
             finetuning_checkpoints_path=config.finetuning_checkpoints_dir,
             imbalance_strategy=config.imbalance_strategy,
+        )
+
+        if best_checkpoint:
+            print(f"Loading best checkpoint for test evaluation: {best_checkpoint}")
+            ckpt = torch.load(best_checkpoint, map_location=device)
+            model.load_state_dict(ckpt["model_state_dict"])
+
+        _ = test_masked(
+            model,
+            test_dataloader,
+            device,
+            epoch=config.epochs,
+            marker_names_map=INV_TOKENIZER,
+            melted_table=melted_table,
+            cli_feat_for_subset=cli_feat_for_subset,
+            classes=classes,
+            current_saliency_config=SALIENCY_CONFIG[subset],
+            label_encoder=label_encoder,
+            step=0,
         )
 
         finish_experiment()

@@ -668,9 +668,23 @@ def plot_roc_curve(n_classes, y_test, y_score, label_encoder):
     # Normalize inputs
 
 
-    y_score = torch.cat(y_score).to(torch.float32).detach().cpu().numpy()
-    
-    y_test = np.asarray(y_test)
+    if isinstance(y_score, list):
+        y_score = torch.cat(y_score)
+    if isinstance(y_score, torch.Tensor):
+        y_score = y_score.to(torch.float32).detach().cpu().numpy()
+    else:
+        y_score = np.asarray(y_score)
+
+    # Normalize y_test
+    if isinstance(y_test, list):
+        # list of tensors or list of ints
+        if len(y_test) > 0 and isinstance(y_test[0], torch.Tensor):
+            y_test = torch.cat(y_test)
+        y_test = np.asarray(y_test)
+    if isinstance(y_test, torch.Tensor):
+        y_test = y_test.detach().cpu().numpy()
+    y_test = np.asarray(y_test).astype(int).reshape(-1)
+
 
     # Collapse any singleton channel dim like (n,1,c) -> (n,c) or (n,c,1) -> (n,c)
     if y_score.ndim == 3:
@@ -687,7 +701,22 @@ def plot_roc_curve(n_classes, y_test, y_score, label_encoder):
    
 
     # Binarize true labels
-    y_onehot_test = label_encoder.binarize(y_test)
+    print("ROC DEBUG")
+    print("  y_test shape:", y_test.shape, "unique:", np.unique(y_test, return_counts=True))
+    print("  y_score shape:", y_score.shape)
+    print("  y_score nan:", np.isnan(y_score).any(), "inf:", np.isinf(y_score).any())
+    print("  y_score min/max:", np.nanmin(y_score), np.nanmax(y_score))
+
+    # Per-class positives/negatives
+    if np.issubdtype(y_test.dtype, np.integer) and y_test.min() >= 0 and y_test.max() < n_classes:
+        y_onehot_test = np.eye(n_classes)[y_test]
+    else:
+        # fall back to label_encoder for raw string labels
+        y_onehot_test = label_encoder.binarize(y_test)
+    for i in range(n_classes):
+        pos = int(np.sum(y_onehot_test[:, i] == 1))
+        neg = int(np.sum(y_onehot_test[:, i] == 0))
+        print(f"  class {i}: pos={pos}, neg={neg}, score range=({y_score[:, i].min():.4f},{y_score[:, i].max():.4f})")
     y_onehot_test = np.asarray(y_onehot_test)
   
 

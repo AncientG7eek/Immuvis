@@ -341,6 +341,18 @@ class FinetuningConfig(BaseModel):
         None, gt=0, description="Max GridCrop patches per image (OOM guard)"
     )
 
+    # Train/val split
+    val_split_ratio: float = Field(
+        0.0,
+        ge=0.0,
+        lt=1.0,
+        description="Fraction of training data to hold out for validation (0 disables).",
+    )
+    val_split_seed: int = Field(
+        42,
+        description="Random seed for train/val split.",
+    )
+
     # Config file paths
     panel_config: str = Field(..., description="Path to panel YAML")
     saliency_config: str = Field(..., description="Path to saliency YAML")

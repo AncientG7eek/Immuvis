@@ -51,6 +51,8 @@ encoder_checkpoints_path:
 from_checkpoint: ImmuVis-616-MSE-768-ma1.pth
 finetuning_checkpoints_dir: models_finetuning/
 save_checkpoint_freq: 5
+imbalance_strategy: weighted_sampler
+weighted_sampler_num_samples: 400
 
 # Comet.ml logging configuration
 tags: [danenberg]
