@@ -805,30 +805,7 @@ def plot_roc_curve(n_classes, y_test, y_score, label_encoder):
     ax.legend(loc="lower right")
     return fig
 
-def log_finetuning_validation_metrics(
-    loss: float,
-    logits: np.array,
-    preds: np.array,
-    y: np.array,
-    saliency_data: list,
-    current_saliency_config,
-    crop_size: int,
-    label_encoder,
-    epoch: int,
-) -> None:
-    """Log validation metrics to Comet.ml.
-
-    Args:
-        loss (float): Validation loss
-        macroF1 (float): Validation macro-f1 score
-        epoch (int): Current epoch number
-        variance_mae_correlation (Optional[float]): Pearson correlation between predicted variances and MAEs per channel
-    """
-    if _experiment is None:
-        return
-
-    classes = label_encoder.get_dict()
-    num_classes = len(classes)
+def _compute_metrics(y, preds, loss, split_name, num_classes):
 
     confusion_matrix = np.zeros((num_classes, num_classes), dtype=int)
     for truth, pred in zip(y, preds):
@@ -846,33 +823,76 @@ def log_finetuning_validation_metrics(
 
 
     metrics = {
-        "val/loss": loss,
-        "val/macroF1": macroF1,
-        "val/precission": precision,
-        "val/recall": recall
+        f"{split_name}/loss": loss,
+        f"{split_name}/macroF1": macroF1,
+        f"{split_name}/precission": precision,
+        f"{split_name}/recall": recall,
     }
 
-    roc = plot_roc_curve(num_classes, y, logits, label_encoder)
-    
-    _experiment.log_metrics(metrics, epoch=epoch)
-    _experiment.log_confusion_matrix(y_true=y, y_predicted=preds)
-    _experiment.log_figure(figure_name="roc", figure=roc)
-
-    channel_groups = current_saliency_config.get("channel_groups", {})
-    markers_names_map = current_saliency_config.get("markers_names_map", {})
-
-    for full_img, crop_coords, weights in saliency_data:
-        log_attention_saliency_imc(
-            full_img,
-            crop_coords,
-            weights,
-            crop_size,
-            channel_groups,
-            markers_names_map=markers_names_map,
-            epoch=epoch,
-            
-        )
     return metrics
+
+def log_finetuning_validation_metrics(
+    loss: float,
+    logits: np.array,
+    preds: np.array,
+    y: np.array,
+    saliency_data: list,
+    current_saliency_config,
+    crop_size: int,
+    label_encoder,
+    epoch: int,
+    split_name: str = "val",
+) -> None:
+    """Log validation metrics to Comet.ml.
+
+    Args:
+        loss (float): Validation loss
+        macroF1 (float): Validation macro-f1 score
+        epoch (int): Current epoch number
+        variance_mae_correlation (Optional[float]): Pearson correlation between predicted variances and MAEs per channel
+    """
+    classes = label_encoder.get_dict()
+    num_classes = len(classes)
+
+    metrics = _compute_metrics(y, preds, loss, split_name, num_classes)
+
+    if _experiment is not None:
+        
+        roc = plot_roc_curve(num_classes, y, logits, label_encoder)
+        
+        _experiment.log_metrics(metrics, epoch=epoch)
+        _experiment.log_confusion_matrix(y_true=y, y_predicted=preds, title=f"{split_name} confusion")
+        _experiment.log_figure(figure_name=f"{split_name}_roc", figure=roc)
+
+        channel_groups = current_saliency_config.get("channel_groups", {})
+        markers_names_map = current_saliency_config.get("markers_names_map", {})
+
+        for full_img, crop_coords, weights in saliency_data:
+            log_attention_saliency_imc(
+                full_img,
+                crop_coords,
+                weights,
+                crop_size,
+                channel_groups,
+                markers_names_map=markers_names_map,
+                epoch=epoch,
+                
+            )
+    return metrics
+
+
+def log_best_epoch(best_epoch: int, best_metric: float, metric_name: str = "val/macroF1") -> None:
+    """Log the best epoch and metric value to Comet."""
+    if _experiment is None:
+        return
+    _experiment.log_metrics(
+        {
+            "val/best_epoch": best_epoch,
+            "val/best_metric": best_metric,
+            "val/best_metric_name": metric_name,
+        },
+        epoch=best_epoch,
+    )
 
 def log_validation_images(
     fig: plt.Figure,

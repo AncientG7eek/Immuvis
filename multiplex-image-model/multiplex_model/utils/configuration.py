@@ -343,7 +343,7 @@ class FinetuningConfig(BaseModel):
 
     # Train/val split
     val_split_ratio: float = Field(
-        0.0,
+        0.15,
         ge=0.0,
         lt=1.0,
         description="Fraction of training data to hold out for validation (0 disables).",

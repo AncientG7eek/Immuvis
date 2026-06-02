@@ -23,6 +23,7 @@ from multiplex_model.utils import (
     init_experiment,
     log_finetuning_training_metrics,
     log_finetuning_validation_metrics,
+    log_best_epoch,
 )
 from multiplex_model.utils.configuration import FinetuningConfig
 
@@ -161,6 +162,7 @@ def train_masked(
     scheduler,
     train_dataloader,
     val_dataloader,
+    config,
     device,
     subset,
     cli_feat_for_subset,
@@ -198,9 +200,10 @@ def train_masked(
     for p in model.encoder.parameters():
         p.requires_grad = False
 
-    top_macro_f1 = 0.0
+    top_macro_f1 = float("-inf")
     no_improvement = 0
     best_checkpoint_path = None
+    best_epoch = None
 
     for epoch in range(start_epoch, epochs):
         model.train()
@@ -268,7 +271,8 @@ def train_masked(
                 running_loss += loss.item()
                 n_images += 1
 
-                scaler.scale(loss / gradient_accumulation_steps).backward()
+                effective_accum_steps = gradient_accumulation_steps * len(bags)  # bags = batch
+                scaler.scale(loss / effective_accum_steps).backward()
 
             if (batch_idx + 1) % gradient_accumulation_steps == 0:
                 scaler.unscale_(optimizer)
@@ -308,6 +312,7 @@ def train_masked(
             val_dataloader,
             device,
             epoch,
+            split_name="val",
             marker_names_map=marker_names_map,
             melted_table=melted_table,
             cli_feat_for_subset=cli_feat_for_subset,
@@ -326,28 +331,31 @@ def train_masked(
                     return best_checkpoint_path
             else:
                 top_macro_f1 = current_macro_f1
+                best_epoch = epoch
+                no_improvement = 0
 
-            checkpoint = {
-                "model_state_dict": model.state_dict(),
-                "optimizer_state_dict": optimizer.state_dict(),
-                "scheduler_state_dict": scheduler.state_dict(),
-                "epoch": epoch,
-            }
-            if (epoch + 1) % save_checkpoint_every == 0:
-                torch.save(
-                    checkpoint,
-                    f"{finetuning_checkpoints_path}/checkpoint-{run_name}-epoch_{epoch}.pth",
-                )
-            torch.save(checkpoint, f"{finetuning_checkpoints_path}/last_checkpoint-{run_name}.pth")
-            if top_macro_f1 == current_macro_f1:
+            if best_epoch == epoch:
+                checkpoint = {
+                    "model_state_dict": model.state_dict(),
+                    "optimizer_state_dict": optimizer.state_dict(),
+                    "scheduler_state_dict": scheduler.state_dict(),
+                    "epoch": epoch,
+                }
                 best_checkpoint_path = (
                     f"{finetuning_checkpoints_path}/best_checkpoint-{run_name}.pth"
                 )
                 torch.save(checkpoint, best_checkpoint_path)
+                log_best_epoch(best_epoch, top_macro_f1)
 
     final_model_path = f"{finetuning_checkpoints_path}/final_model-{run_name}.pth"
-    print(f"Training completed. Saving final model at {final_model_path}...")
     torch.save({"model_state_dict": model.state_dict()}, final_model_path)
+    if best_checkpoint_path:
+        print(
+            f"Training completed. Best checkpoint: {best_checkpoint_path}. "
+            f"Final model saved at: {final_model_path}"
+        )
+    else:
+        print(f"Training completed. Final model saved at: {final_model_path}")
     return best_checkpoint_path
 
 
@@ -356,6 +364,7 @@ def test_masked(
     test_dataloader,
     device,
     epoch,
+    split_name,
     marker_names_map,
     melted_table,
     cli_feat_for_subset,
@@ -406,8 +415,6 @@ def test_masked(
                 n_images += 1
                 
                 if n_images_with_weight < 5:
-                    saliency_data.append([img, coords, weights])
-                    # store numpy 1D weights or None
                     if weights is not None:
                         w_t = weights.detach().cpu() if isinstance(weights, torch.Tensor) else weights
                         w_np = np.asarray(w_t).squeeze()
@@ -432,11 +439,13 @@ def test_masked(
         crop_size=config.input_image_size[0],
         label_encoder=label_encoder,
         epoch=epoch,
+        split_name=split_name,
     )
     print(f"{'=' * 40} EPOCH {epoch + 1} {'=' * 40}")
-    print(f"Val loss: {val_loss:.4f}")
-    if "val/macroF1" in val_metrics:
-        print(f"Val macro-F1: {val_metrics['val/macroF1']:.4f}")
+    print(f"{split_name.title()} loss: {val_loss:.4f}")
+    metric_key = f"{split_name}/macroF1"
+    if metric_key in val_metrics:
+        print(f"{split_name.title()} macro-F1: {val_metrics[metric_key]:.4f}")
     print("=" * 90)
     return val_metrics
 
@@ -658,6 +667,7 @@ if __name__ == "__main__":
             scheduler,
             train_dataloader,
             val_dataloader,
+            config,
             device,
             subset,
             cli_feat_for_subset,
@@ -683,6 +693,7 @@ if __name__ == "__main__":
             test_dataloader,
             device,
             epoch=config.epochs,
+            split_name="test",
             marker_names_map=INV_TOKENIZER,
             melted_table=melted_table,
             cli_feat_for_subset=cli_feat_for_subset,

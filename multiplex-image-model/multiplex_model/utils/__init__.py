@@ -31,6 +31,7 @@ from .train_logging import (
     log_validation_metrics,
     log_finetuning_training_metrics,
     log_finetuning_validation_metrics,
+    log_best_epoch,
     plot_reconstructs_with_masks,
     plot_reconstructs_with_uncertainty,
 )
@@ -54,6 +55,7 @@ __all__ = [
     "log_validation_metrics",
     "log_finetuning_training_metrics",
     "log_finetuning_validation_metrics",
+    "log_best_epoch",
     "log_validation_images",
     "get_run_name",
     "finish_experiment",
