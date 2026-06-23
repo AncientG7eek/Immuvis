@@ -27,36 +27,38 @@ abmil:
 
 # Data configuration
 machine: szary
-dataset_subsets: [['danenberg', 'Grade']]
+dataset_subsets: [['danenberg', 'Grade']] # check if not overwrited with cli command
 panel_config: configs/all_panels_config.yaml
 saliency_config: configs/saliency_config.yaml
 tokenizer_config: configs/all_markers_tokenizer.yaml
-input_image_size: [64, 64]
-max_crops_per_image: 64
+input_image_size: [128, 128]
+max_crops_per_image: 16
 num_workers: 8
-batch_size: 4
+batch_size: 1
 
-# Training configuration
+# Finetuning configuration
 device: cuda
-encoder_lr: 5e-5
-classifier_lr: 5e-3
+encoder_lr: 1e-5
+classifier_lr: 5e-4
 final_lr: 1e-5
 weight_decay: 0.0001
 gradient_accumulation_steps: 4
-epochs: 20
+epochs: 100
+early_stopping_patience: 8
 frac_warmup_steps: 0.1
 val_split_ratio: 0.15
 encoder_checkpoints_path:
   szary: /raid_encrypted/immucan/models/
   local: models/
-from_checkpoint: ImmuVis-616-MSE-768-ma1.pth
+from_checkpoint: ImmuVis-616-MSE-768-ma1.pth #ImmuVis-603-beta-768-ma1.pth
 finetuning_checkpoints_dir: models_finetuning/
 save_checkpoint_freq: 5
 imbalance_strategy: weighted_sampler
-weighted_sampler_num_samples: 400
+weighted_sampler_num_samples: null
+min_class_fraction: 0.05
 
 # Comet.ml logging configuration
 tags: [danenberg]
 comet_project: 'immuvis-finetuning'
-comet_workspace: null
-comet_api_key: null
+comet_workspace: null # or set as an environmental variable
+comet_api_key: null # or set as an environmental variable

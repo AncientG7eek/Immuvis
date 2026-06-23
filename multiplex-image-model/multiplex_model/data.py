@@ -133,7 +133,7 @@ class DatasetFromTIFF(Dataset):
         return scaled_img
 
     def norm_clip(self, img, dataset):
-        """Normalize image channels to [0, 1] range using clipping."""
+        """Normalize image channels to [0, 1] range using global (per dataset) clipping."""
         upper_bound = self.clip_limits.get(dataset, self.global_upper_bound)
         img = np.clip(img, 0, upper_bound) / upper_bound
         return img
@@ -260,17 +260,97 @@ class TestCrop:
         return img, (top,left)
 
 class GridCrop:
-    def __init__(self, crop_size: int, max_crops: int = 64):
+    def __init__(self, crop_size: int, max_crops: int = 64, augmentation: int | bool = False):
+        """
+        Grid-based cropping with optional augmentation.
+        
+        Args:
+            crop_size (int): Size of each crop.
+            max_crops (int): Maximum number of crops to extract.
+            augmentation (int | bool): 
+                - False or 0: No augmentation (default)
+                - True or 1: Single augmented version per crop
+                - N (N>1): N augmented versions per crop
+        """
         self.crop_size = crop_size
         self.max_crops = max_crops
+        
+        # Convert bool to int for uniform handling
+        if isinstance(augmentation, bool):
+            self.num_augmentations = int(augmentation)
+        else:
+            self.num_augmentations = int(augmentation)
 
-    def __call__(self, img: torch.Tensor) -> List[torch.Tensor]:
+    def _augment_crop(self, crop_img: np.ndarray) -> np.ndarray:
+        """
+        Apply random augmentations to a single crop.
+        
+        Args:
+            crop_img (np.ndarray): Input crop of shape (C, H, W) or (H, W, C)
+            
+        Returns:
+            np.ndarray: Augmented crop
+        """
+        aug_img = crop_img.copy()
+        
+        # Random horizontal flip
+        if random.random() > 0.5:
+            aug_img = np.fliplr(aug_img)
+        
+        # Random vertical flip
+        if random.random() > 0.5:
+            aug_img = np.flipud(aug_img)
+        
+        # Random intensity scaling per channel
+        # Assuming crop_img is (C, H, W) based on the code
+        if aug_img.ndim == 3:
+            for c in range(aug_img.shape[0]):
+                # Scale intensity by 0.8 to 1.2 to simulate staining variability
+                scale = np.random.uniform(0.8, 1.2)
+                aug_img[c] = np.clip(aug_img[c] * scale, 0, aug_img[c].max())
+        
+        return aug_img
+
+    def _random_offset_crop(self, img: torch.Tensor, base_top: int, base_left: int) -> np.ndarray:
+        """
+        Crop with random offset to add spatial variability.
+        
+        Args:
+            img (torch.Tensor): Full image tensor
+            base_top (int): Base top coordinate
+            base_left (int): Base left coordinate
+            
+        Returns:
+            np.ndarray: Cropped region with random offset
+        """
+        h, w = img.shape[-2], img.shape[-1]
+        offset_range = self.crop_size // 4
+        
+        # Random offset within ±crop_size//4
+        offset_top = random.randint(-offset_range, offset_range)
+        offset_left = random.randint(-offset_range, offset_range)
+        
+        # Clamp to valid bounds
+        top = max(0, min(base_top + offset_top, h - self.crop_size))
+        left = max(0, min(base_left + offset_left, w - self.crop_size))
+        
+        c = crop(img, top, left, self.crop_size, self.crop_size)
+        return c.numpy()
+
+    def __call__(self, img: torch.Tensor) -> tuple[List[np.ndarray], np.ndarray]:
+        """
+        Extract crops with optional augmentation.
+        
+        Returns:
+            tuple: (crops, coordinates) where
+                - crops: List of augmented crop arrays
+                - coordinates: Array of (top, left) coordinates for each base crop
+        """
         h, w = img.shape[-2], img.shape[-1]
         crops = []
-        coordinates = [] # [((x,x),(y,y))] crop's span in x and y dim
+        coordinates = [] # [((top, top+size), (left, left+size))] crop's span in x and y dim
         num_rows = h // self.crop_size
         num_cols = w // self.crop_size
-        
         
         if self.max_crops and (num_rows * num_cols) > self.max_crops:
             print(f"Number of crops exceeded {self.max_crops}. Taking a central square...")
@@ -290,9 +370,34 @@ class GridCrop:
             for j in range(col_start, col_end):
                 top = i * self.crop_size
                 left = j * self.crop_size
-                c = crop(img, top, left, self.crop_size, self.crop_size)
-                crops.append(c.numpy())
+                
+                # Store base coordinates only once (not per augmentation)
                 coordinates.append(((int(top), int(top) + self.crop_size),
                                     (int(left), int(left) + self.crop_size)))
-        print(f"len crops: {len(crops)}")
+                
+                if self.num_augmentations == 0:
+                    # No augmentation: single deterministic crop
+                    c = crop(img, top, left, self.crop_size, self.crop_size)
+                    crops.append(c.numpy())
+                else:
+                    # Generate num_augmentations versions of this crop
+                    for _ in range(self.num_augmentations):
+                        # Extract crop with random offset
+                        aug_crop = self._random_offset_crop(img, top, left)
+                        # Apply random flips and intensity scaling
+                        aug_crop = self._augment_crop(aug_crop)
+                        crops.append(aug_crop)
+        
+        num_base_crops = len(coordinates)
+        num_total_crops = len(crops)
+        augmentation_factor = num_total_crops // num_base_crops if num_base_crops > 0 else 0
+        
+        print(f"GridCrop: {num_total_crops} total crops ({num_base_crops} base × {augmentation_factor} factor), augmentation={self.num_augmentations}")
+        
+        # Sanity check: ensure crops and coordinates have consistent relationship
+        if num_base_crops > 0 and num_total_crops != num_base_crops * augmentation_factor:
+            raise RuntimeError(
+                f"Crop count mismatch: {num_total_crops} crops != {num_base_crops} base_crops × {augmentation_factor} aug_factor"
+            )
+        
         return crops, np.array(coordinates)

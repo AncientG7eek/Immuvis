@@ -11,6 +11,7 @@ from torch.amp import GradScaler, autocast
 from torch.utils.data import DataLoader, WeightedRandomSampler, random_split
 from tqdm import tqdm
 from sklearn.utils.class_weight import compute_class_weight
+from collections import defaultdict
 
 from multiplex_model.clinical import LabelEncoder, get_a_subset
 from multiplex_model.data import DatasetFromTIFF, PanelBatchSampler, GridCrop
@@ -51,6 +52,7 @@ def calc_class_imbalance(melted_table, subset, cli_feat_for_subset, classes, dev
     return class_weights_tensor
 
 
+
 def build_weighted_sampler(
     dataset: DatasetFromTIFF,
     indices: list[int] | None,
@@ -59,6 +61,7 @@ def build_weighted_sampler(
     classes: np.ndarray,
     label_encoder: LabelEncoder,
     num_samples: int | None = None,
+    min_class_fraction: float | None = None,
 ) -> tuple[WeightedRandomSampler, dict[str, int]]:
     """Create a WeightedRandomSampler over dataset indices using clinical labels."""
     class_counts = {cls: 0 for cls in classes}
@@ -66,6 +69,7 @@ def build_weighted_sampler(
     if indices is None:
         indices = list(range(len(dataset.imgs)))
 
+    cached_labels = []
     for idx in indices:
         img_path, _dataset = dataset.imgs[idx]
         img_stem = os.path.basename(img_path).split(".")[0]
@@ -76,6 +80,7 @@ def build_weighted_sampler(
             label_encoder,
             device=torch.device("cpu"),
         )
+        cached_labels.append(label)
         if label is None:
             sample_weights.append(0.0)
             continue
@@ -86,30 +91,34 @@ def build_weighted_sampler(
     if sum(sample_weights) == 0:
         raise ValueError("No labeled samples found for weighted sampling.")
 
-    counts = {cls: max(1, count) for cls, count in class_counts.items()}
-    for local_idx, idx in enumerate(indices):
+    class_counts = {cls: max(1, count) for cls, count in class_counts.items()}
+
+
+    if min_class_fraction:
+        treshold = min_class_fraction * sum(class_counts.values())
+        class_counts = {
+            cls : num
+            for cls, num in class_counts.items()
+            if num >= treshold
+        }
+    valid_classes = set(class_counts.keys())
+
+    for local_idx, label in enumerate(cached_labels):
         if sample_weights[local_idx] == 0.0:
             continue
-        img_path, _dataset = dataset.imgs[idx]
-        img_stem = os.path.basename(img_path).split(".")[0]
-        label = _get_label(
-            img_stem,
-            melted_table,
-            cli_feat_for_subset,
-            label_encoder,
-            device=torch.device("cpu"),
-        )
-    decoded = label_encoder.decode([label.item()])[0]
-    sample_weights[local_idx] = 1.0 / counts[decoded]
+        decoded = label_encoder.decode([label.item()])[0]
+        if decoded not in valid_classes:
+            sample_weights[local_idx] = 0.0
+            continue
+        sample_weights[local_idx] = 1.0 / class_counts[decoded]
 
     samples_weight = torch.tensor(sample_weights, dtype=torch.double)
-    effective_samples = int(samples_weight.sum().item())
+    effective_samples = sum(class_counts.values())
     if num_samples is None:
         num_samples = max(1, effective_samples)
 
     sampler = WeightedRandomSampler(samples_weight, num_samples=num_samples, replacement=True)
     return sampler, class_counts
-
 
 def bag_collate(batch):
     """Preserve per-image (bag) structure for ABMIL-compatible batching.
@@ -145,14 +154,24 @@ def _get_label(
     label_encoder: LabelEncoder,
     device: torch.device,
 ) -> torch.Tensor | None:
-    """Return (1,) long tensor with encoded label, or None if unavailable."""
+    """Return (1,) long tensor with encoded label, or None if unavailable.
+
+    If the label value is not known to the provided label encoder, return None.
+    This allows validation/test images with excluded classes to be skipped cleanly.
+    """
     img_rows = get_a_subset(melted_table, "img_name", img_stem)
     selected = get_a_subset(img_rows, "feature", cli_feat_for_subset).dropna()
     if len(selected) == 0:
         return None
     label_val = selected.iloc[0]["value"]
+    try:
+        encoded = label_encoder.encode([label_val])
+    except KeyError:
+        return None
     return torch.tensor(
-        label_encoder.encode([label_val]), device=device, dtype=torch.long
+        encoded,
+        device=device,
+        dtype=torch.long,
     )
 
 
@@ -171,8 +190,10 @@ def train_masked(
     saliency_config,
     marker_names_map,
     epochs=10,
+    early_stopping_patience=8,
     gradient_accumulation_steps=1,
     start_epoch=0,
+    encoder_frozen=True,
     save_checkpoint_every=5,
     finetuning_checkpoints_path="checkpoints",
     imbalance_strategy: str = "class_weight",
@@ -210,9 +231,10 @@ def train_masked(
         all_preds, all_y = [], []
         running_loss = 0.0
         n_images = 0
-        class_count = {c:0 for c in classes}
 
-        if epoch == 5:
+        if encoder_frozen and epoch >= 5:
+            encoder_frozen = False
+
             for p in model.encoder.parameters():
                 p.requires_grad = True
 
@@ -327,7 +349,7 @@ def train_masked(
             current_macro_f1 = float(val_metrics["val/macroF1"])
             if top_macro_f1 >= current_macro_f1:
                 no_improvement += 1
-                if no_improvement > 7:
+                if no_improvement >= early_stopping_patience:
                     return best_checkpoint_path
             else:
                 top_macro_f1 = current_macro_f1
@@ -339,6 +361,7 @@ def train_masked(
                     "model_state_dict": model.state_dict(),
                     "optimizer_state_dict": optimizer.state_dict(),
                     "scheduler_state_dict": scheduler.state_dict(),
+                    "encoder_frozen": encoder_frozen,
                     "epoch": epoch,
                 }
                 best_checkpoint_path = (
@@ -381,6 +404,7 @@ def test_masked(
     n_images = 0
     n_images_with_weight = 0
     saliency_data = []
+    seen_classes = defaultdict(int)
 
     with torch.no_grad():
         for bags, coords_list, channel_ids_list, img_paths, imgs in tqdm(
@@ -391,13 +415,14 @@ def test_masked(
                 y = _get_label(img_stem, melted_table, cli_feat_for_subset, label_encoder, device)
                 if y is None:
                     continue
+                y_item = y.item()
 
                 crops = crops.to(device, dtype=torch.float32)
                 channel_ids = channel_ids.to(device, dtype=torch.long)
+                seen_classes[y_item] += 1
 
                 with autocast(device_type="cuda", dtype=torch.bfloat16):
-                    if n_images_with_weight < 5:
-                        
+                    if seen_classes[y_item] <= 5:
                         res = model(crops, channel_ids, return_attention=True)
                         if isinstance(res, tuple):
                             logits, weights = res
@@ -414,11 +439,11 @@ def test_masked(
                 running_loss += loss.item()
                 n_images += 1
                 
-                if n_images_with_weight < 5:
+                if seen_classes[y_item] <= 5:
                     if weights is not None:
                         w_t = weights.detach().cpu() if isinstance(weights, torch.Tensor) else weights
                         w_np = np.asarray(w_t).squeeze()
-                        saliency_data.append([img, coords, w_np])
+                        saliency_data.append([img, coords, w_np, img_stem])
                         n_images_with_weight += 1
 
     if n_images == 0:
@@ -463,6 +488,11 @@ if __name__ == "__main__":
         if len(sys.argv) > 4:
             config.device = sys.argv[4]
 
+    # Update tags to match the dataset_subsets to avoid confusion in Comet.ml
+    # Extract unique dataset names from dataset_subsets
+    dataset_names = [subset[0] for subset in config.dataset_subsets]
+    config.tags = list(set(dataset_names))  # Remove duplicates
+    
     device = config.device
     print(f"Using device: {device}")
 
@@ -474,13 +504,20 @@ if __name__ == "__main__":
     MELTED_TABLE_PATH = "../melted_table/results/melted_table.csv"
     melted_table = pd.read_csv(MELTED_TABLE_PATH)
 
-    train_transform = GridCrop(config.input_image_size[0], max_crops=config.max_crops_per_image)
-    test_transform  = GridCrop(config.input_image_size[0], max_crops=config.max_crops_per_image)
+    # Training transform: use augmentation to boost small datasets
+    # N=2 means each crop gets 2 random augmentations, giving 2x more training samples
+    train_transform = GridCrop(config.input_image_size[0], max_crops=config.max_crops_per_image, augmentation=2)
+    # Test/validation transform: NO augmentation (deterministic grid crops only)
+    test_transform  = GridCrop(config.input_image_size[0], max_crops=config.max_crops_per_image, augmentation=False)
 
     for subset, cli_feat_for_subset in config.dataset_subsets:
+        
         classes = melted_table[melted_table["dataset"] == subset]
         classes = classes[classes["feature"] == cli_feat_for_subset].dropna()
         classes = np.unique(classes["value"])
+
+
+
         print(f"subset={subset}  feature={cli_feat_for_subset}  classes={classes}")
 
         train_dataset = DatasetFromTIFF(
@@ -490,7 +527,7 @@ if __name__ == "__main__":
             machine=config.machine,
             subset=subset,
             transform=train_transform,
-            use_preprocessing=False,
+            use_preprocessing=True,
             use_median_denoising=False,
             use_butterworth_filter=True,
             use_minmax_normalization=False,
@@ -504,7 +541,7 @@ if __name__ == "__main__":
             machine=config.machine,
             subset=subset,
             transform=test_transform,
-            use_preprocessing=False,
+            use_preprocessing=True,
             use_median_denoising=False,
             use_butterworth_filter=True,
             use_minmax_normalization=False,
@@ -538,8 +575,17 @@ if __name__ == "__main__":
                 classes,
                 label_encoder,
                 num_samples=config.weighted_sampler_num_samples,
+                min_class_fraction=config.min_class_fraction,
             )
             print(f"Weighted sampler class counts: {class_counts}")
+            
+            # Filter classes to only include those present in training set
+            # This ensures validation/test only consider classes that were actually used for training
+            valid_classes = np.array(sorted(class_counts.keys()))
+            if len(valid_classes) < len(classes):
+                print(f"Filtering classes from {list(classes)} to {list(valid_classes)}")
+                classes = valid_classes
+                label_encoder = LabelEncoder(classes)
 
         if train_sampler is None:
             train_dataloader = DataLoader(
@@ -634,6 +680,8 @@ if __name__ == "__main__":
             else:
                 print("Warning: no 'encoder.*' keys found in checkpoint")
 
+            encoder_frozen = ckpt.get("encoder_frozen", True)
+
         total_steps = (
             len(train_dataloader) * config.epochs // config.gradient_accumulation_steps
         )
@@ -676,7 +724,9 @@ if __name__ == "__main__":
             saliency_config=SALIENCY_CONFIG,
             marker_names_map=INV_TOKENIZER,
             epochs=config.epochs,
+            early_stopping_patience=config.early_stopping_patience,
             start_epoch=0,
+            encoder_frozen=True,
             gradient_accumulation_steps=config.gradient_accumulation_steps,
             save_checkpoint_every=config.save_checkpoint_freq,
             finetuning_checkpoints_path=config.finetuning_checkpoints_dir,

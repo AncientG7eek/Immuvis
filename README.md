@@ -153,6 +153,12 @@ Requires Python ≥ 3.12 and PyTorch ≥ 2.7 with CUDA.
 
 ---
 
+## Reproducibility
+
+Reported runs:
+https://www.comet.com/ancientg7eek/immuvis-finetuning/view/new/panels
+---
+
 ## Known issues
 
 See [`TODO.md`](TODO.md) for a prioritised list of bugs and training improvements identified in code review, including critical issues affecting fine-tuning macro-F1.

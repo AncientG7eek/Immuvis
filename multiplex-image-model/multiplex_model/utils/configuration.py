@@ -362,7 +362,7 @@ class FinetuningConfig(BaseModel):
     dataset_subsets: list[list] = Field(
         ..., description="[['dataset_name', 'clinical_feature'], ...]"
     )
-
+    
     # Optimiser
     encoder_lr: float = Field(..., gt=0)
     classifier_lr: float = Field(..., gt=0)
@@ -371,6 +371,7 @@ class FinetuningConfig(BaseModel):
     weight_decay: float = Field(..., ge=0)
     gradient_accumulation_steps: int = Field(..., gt=0)
     epochs: int = Field(..., gt=0)
+    early_stopping_patience: int = Field(..., description = "early stopping patience")
 
     # Imbalance handling
     imbalance_strategy: Literal[
@@ -390,6 +391,11 @@ class FinetuningConfig(BaseModel):
             "Defaults to number of labeled samples if None."
         ),
     )
+    min_class_fraction: float = Field(
+        ..., description="""Smallest % that a class can constitute of the whole dataset to 
+                            be considered in training and testing"""
+        )
+
 
     # Model architecture
     head_type: Literal["logistic", "abmil"] = Field(

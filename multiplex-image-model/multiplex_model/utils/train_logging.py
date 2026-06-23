@@ -146,8 +146,18 @@ def plot_attention_saliency_imc(
     crop_coords = np.asarray(crop_coords)
     if weights.ndim == 0:
         weights = np.array([float(weights)])
+    
+    # Handle case where we have more weights than coordinates (e.g., from augmented crops)
+    # Aggregate weights by averaging over augmentations
     if crop_coords.shape[0] != weights.shape[0]:
-        raise ValueError(f"num crops {crop_coords.shape[0]} != num weights {weights.shape[0]}")
+        if weights.shape[0] % crop_coords.shape[0] == 0:
+            # Weights are a multiple of coordinates (likely from augmented crops)
+            aug_factor = weights.shape[0] // crop_coords.shape[0]
+            print(f"[WARNING] Aggregating {weights.shape[0]} augmented weights to {crop_coords.shape[0]} base crops (aug_factor={aug_factor})")
+            # Reshape and average weights across augmentations
+            weights = weights.reshape(crop_coords.shape[0], aug_factor).mean(axis=1)
+        else:
+            raise ValueError(f"num crops {crop_coords.shape[0]} != num weights {weights.shape[0]} and not a multiple")
     
     # Convert (x,y) top-left to (x,y,w,h) top-left if shape is Nx2
    
@@ -632,37 +642,16 @@ def log_finetuning_training_metrics(
         epoch (int): Current epoch number
         variance_mae_correlation (Optional[float]): Pearson correlation between predicted variances and MAEs per channel
     """
-    if _experiment is None:
-        return
 
-    num_classes = len(label_encoder.get_dict())
+    metrics = _compute_metrics(y, preds, loss, "train", label_encoder)
+    metrics["train/lr"] = lr
 
-    confusion_matrix = np.zeros((num_classes, num_classes), dtype=int)
-    for truth, pred in zip(y, preds):
-        confusion_matrix[truth, pred] += 1
-
-    TP = np.diag(confusion_matrix)
-    FP = confusion_matrix.sum(axis=0) - TP
-    FN = confusion_matrix.sum(axis=1) - TP
-    
-    precision = TP / (TP+FP+1e-10)
-    recall = TP / (TP+FN+1e-10)
-
-    F1score = 2*precision*recall / (precision+recall+1e-10)
-    macroF1 = np.mean(F1score)
-
-
-    metrics = {
-        "train/lr": lr,
-        "train/loss": loss,
-        "train/macroF1": macroF1,
-        "train/precission": precision,
-        "train/recall": recall
-    }
-    _experiment.log_metrics(metrics, epoch=epoch)
+    if _experiment:
+        _experiment.log_metrics(metrics, epoch=epoch)
     
 
     return metrics
+
 
 def plot_roc_curve(n_classes, y_test, y_score, label_encoder):
     # Normalize inputs
@@ -805,7 +794,10 @@ def plot_roc_curve(n_classes, y_test, y_score, label_encoder):
     ax.legend(loc="lower right")
     return fig
 
-def _compute_metrics(y, preds, loss, split_name, num_classes):
+def _compute_metrics(y, preds, loss, split_name, label_encoder):
+
+    classes = label_encoder.get_dict()
+    num_classes = len(classes)
 
     confusion_matrix = np.zeros((num_classes, num_classes), dtype=int)
     for truth, pred in zip(y, preds):
@@ -822,12 +814,25 @@ def _compute_metrics(y, preds, loss, split_name, num_classes):
     macroF1 = np.mean(F1score)
 
 
+    # Resolve class names for logging
+    if hasattr(label_encoder, "get_dict"):
+        class_dict = label_encoder.get_dict()
+        class_names = [None] * num_classes
+        for cls_name, cls_idx in class_dict.items():
+            if 0 <= cls_idx < num_classes:
+                class_names[cls_idx] = str(cls_name)
+        class_names = [name if name is not None else str(i) for i, name in enumerate(class_names)]
+    else:
+        class_names = [str(i) for i in range(num_classes)]
+
     metrics = {
         f"{split_name}/loss": loss,
         f"{split_name}/macroF1": macroF1,
-        f"{split_name}/precission": precision,
-        f"{split_name}/recall": recall,
     }
+
+    for i, cls_name in enumerate(class_names):
+        metrics[f"{split_name}/precision/{cls_name}"] = float(precision[i])
+        metrics[f"{split_name}/recall/{cls_name}"] = float(recall[i])
 
     return metrics
 
@@ -854,7 +859,7 @@ def log_finetuning_validation_metrics(
     classes = label_encoder.get_dict()
     num_classes = len(classes)
 
-    metrics = _compute_metrics(y, preds, loss, split_name, num_classes)
+    metrics = _compute_metrics(y, preds, loss, split_name, label_encoder)
 
     if _experiment is not None:
         
@@ -867,13 +872,14 @@ def log_finetuning_validation_metrics(
         channel_groups = current_saliency_config.get("channel_groups", {})
         markers_names_map = current_saliency_config.get("markers_names_map", {})
 
-        for full_img, crop_coords, weights in saliency_data:
+        for full_img, crop_coords, weights, img_name in saliency_data:
             log_attention_saliency_imc(
                 full_img,
                 crop_coords,
                 weights,
                 crop_size,
                 channel_groups,
+                name=img_name,
                 markers_names_map=markers_names_map,
                 epoch=epoch,
                 

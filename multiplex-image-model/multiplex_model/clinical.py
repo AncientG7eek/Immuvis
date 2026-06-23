@@ -108,5 +108,8 @@ class LabelEncoder():
     
     def get_dict(self):
         return self.dict
+    
+    def get_inv_dict(self):
+        return self.inv_dict
 
 
